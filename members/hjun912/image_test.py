@@ -6,170 +6,219 @@ import gradio as gr
 from torchvision import transforms
 from PIL import Image
 import os
+import time
 from transformers import pipeline
+from ultralytics import YOLO
 
-# [NEW] C2PA 라이브러리 (선택 사항)
+# MediaPipe 초기화 및 안전 로드
+MEDIAPIPE_AVAILABLE = False
 try:
-    import c2pa
-    C2PA_AVAILABLE = True
-except ImportError:
-    C2PA_AVAILABLE = False
+    import mediapipe as mp
+    if hasattr(mp, 'solutions'):
+        mp_face_mesh = mp.solutions.face_mesh
+        face_mesh = mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=5, refine_landmarks=True)
+        MEDIAPIPE_AVAILABLE = True
+except Exception:
+    MEDIAPIPE_AVAILABLE = False
 
-# AI Image Detector 로드 (umm-maybe/AI-image-detector)
+try:
+    yolo_model = YOLO("yolo11n.pt")
+    YOLO_AVAILABLE = True
+except Exception:
+    YOLO_AVAILABLE = False
+
+# 강력한 모델 앙상블 로드
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 try:
-    vit_detector = pipeline("image-classification", model="umm-maybe/AI-image-detector", device=0 if torch.cuda.is_available() else -1)
+    detector_main = pipeline("image-classification", model="nateraw/vit-base-patch16-224-deepfake", device=0 if torch.cuda.is_available() else -1)
+    detector_face = pipeline("image-classification", model="prithivMLmods/Deep-Fake-Detector-Model", device=0 if torch.cuda.is_available() else -1)
     VIT_AVAILABLE = True
 except Exception:
     VIT_AVAILABLE = False
 
-# Gram Matrix 질감 분석
-def get_gram_matrix(img_tensor):
-    (b, c, h, w) = img_tensor.size()
-    features = img_tensor.view(b, c, h * w)
-    gram = torch.bmm(features, features.transpose(1, 2))
-    return gram / (c * h * w)
+performance_history = {"TP": 0, "FP": 0, "FN": 0, "TN": 0, "total_time": 0.0, "count": 0}
 
-# 전처리 설정
-preprocess = transforms.Compose([
-    transforms.Resize(256),
-    transforms.CenterCrop(224),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-])
+# 2. 정밀 포렌식 분석 함수들
 
-# 2. C2PA 검사
-def check_c2pa_metadata(image_path):
-    if not C2PA_AVAILABLE: return None, "C2PA 라이브러리 없음"
+# 2.1 얼굴 배치 및 해부학적 비율 분석 (New)
+def analyze_face_alignment(landmarks):
+    if not landmarks: return 0.0, "데이터 없음"
     try:
-        reader = c2pa.Reader(image_path)
-        manifest = reader.json()
-        if manifest:
-            if "ai" in str(manifest).lower(): return 100.0, "✅ C2PA: AI 생성물 확인"
-            return 0.0, "✅ C2PA: 원본 확인"
-    except Exception: pass
-    return None, "🔍 C2PA 데이터 없음"
+        pts = landmarks.landmark
+        # 눈-코 거리 vs 코-입 거리 비율 (보통 1:1 ~ 1:1.2 수준이 정상)
+        eye_center_y = (pts[33].y + pts[263].y) / 2
+        nose_y = pts[1].y
+        mouth_y = (pts[61].y + pts[291].y) / 2
+        
+        upper_dist = abs(nose_y - eye_center_y)
+        lower_dist = abs(mouth_y - nose_y)
+        ratio = upper_dist / (lower_dist + 1e-6)
+        
+        # 비정상적 비율(너무 길거나 짧음) 탐지
+        if ratio < 0.7 or ratio > 1.5:
+            score = 80.0
+        else:
+            score = abs(1.0 - ratio) * 100
+            
+        return max(0, min(100, score)), f"이목구비 배치 비율: {ratio:.2f}"
+    except: return 0.0, "분석 불가"
 
-# 3. 이미지 AI 판별 로직 (ViT + Gram-Net + FFT)
+# 2.2 피부색 일관성 및 색상 번짐 분석 (New)
+def analyze_skin_tone_consistency(frame_rgb, landmarks):
+    if not landmarks: return 0.0, "데이터 없음"
+    try:
+        h, w, _ = frame_rgb.shape
+        # Lab 색공간으로 변환 (인간의 색지각과 유사함)
+        lab_img = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2LAB)
+        
+        def get_avg_color(idx):
+            cx, cy = int(landmarks.landmark[idx].x * w), int(landmarks.landmark[idx].y * h)
+            patch = lab_img[cy-5:cy+5, cx-5:cx+5]
+            return np.mean(patch, axis=(0, 1)) if patch.size > 0 else None
+
+        # 이마(10), 왼쪽 뺨(234), 오른쪽 뺨(454), 턱(152) 샘플링
+        colors = [get_avg_color(i) for i in [10, 234, 454, 152]]
+        colors = [c for c in colors if c is not None]
+        
+        if len(colors) >= 2:
+            # 샘플들 간의 색상 거리(Delta E) 계산
+            diffs = []
+            for i in range(len(colors)):
+                for j in range(i + 1, len(colors)):
+                    diffs.append(np.linalg.norm(colors[i][1:] - colors[j][1:])) # a, b 채널만 비교
+            
+            avg_diff = np.mean(diffs)
+            # AI 합성은 피부톤이 얼룩덜룩하거나(번짐) 특정 부위만 튀는 경우가 많음
+            score = max(0, min(100, (avg_diff - 3) * 10))
+            return score, f"피부톤 불일치 지수: {avg_diff:.2f}"
+    except: pass
+    return 0.0, "분석 불가"
+
+# 기존 눈, 피부, 치아 분석 함수 유지... (최적화)
+def analyze_eye_details(frame_rgb, landmarks):
+    if not landmarks: return 0.0, "데이터 없음"
+    try:
+        h, w, _ = frame_rgb.shape
+        def get_eye_patch(idx_list):
+            pts = np.array([[landmarks.landmark[i].x * w, landmarks.landmark[i].y * h] for i in idx_list])
+            x, y, sw, sh = cv2.boundingRect(pts.astype(np.int32))
+            patch = frame_rgb[y:y+sh, x:x+sw]
+            return cv2.resize(cv2.cvtColor(patch, cv2.COLOR_RGB2GRAY), (50, 30)) if patch.size > 0 else None
+        l_e, r_e = get_eye_patch([33, 160, 133, 144]), get_eye_patch([362, 385, 263, 373])
+        if l_e is not None and r_e is not None:
+            res = cv2.matchTemplate(l_e, r_e, cv2.TM_CCOEFF_NORMED)[0][0]
+            return max(0, (1 - res) * 100), f"눈 대칭 상관도: {res:.2f}"
+    except: pass
+    return 0.0, "분석 불가"
+
+# 3. 이미지 AI 판별 메인 로직
 def analyze_image_ai(image_path):
     try:
-        img = Image.open(image_path).convert('RGB')
-        frame = np.array(img)
-        frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        img_pil = Image.open(image_path).convert('RGB')
+        frame_rgb = np.array(img_pil); frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR); gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         
-        # 1. ViT 분석
+        landmarks = None
+        if MEDIAPIPE_AVAILABLE:
+            mp_res = face_mesh.process(frame_rgb)
+            if mp_res.multi_face_landmarks: landmarks = mp_res.multi_face_landmarks[0]
+
+        # 앙상블 분석
         vit_score = 0
         if VIT_AVAILABLE:
-            res = vit_detector(img)
-            vit_score = sum([r['score'] for r in res if 'ai' in r['label'].lower() or 'artificial' in r['label'].lower()]) * 100
+            res_m = detector_main(img_pil); res_f = detector_face(img_pil)
+            neg = ['ai', 'fake', 'synthetic', 'generated', 'modified']
+            s_m = sum([r['score'] for r in res_m if any(l in r['label'].lower() for l in neg)]) * 100
+            s_f = sum([r['score'] for r in res_f if any(l in r['label'].lower() for l in neg)]) * 100
+            vit_score = (s_m * 0.6 + s_f * 0.4)
 
-        # 2. Gram Matrix 질감 분석
-        input_tensor = preprocess(img).unsqueeze(0).to(device)
-        with torch.no_grad():
-            gram = get_gram_matrix(input_tensor)
-            gram_val = torch.std(gram).item() * 1000
+        # 포렌식 지표 계산
+        eye_score, eye_msg = analyze_eye_details(frame_rgb, landmarks)
+        align_score, align_msg = analyze_face_alignment(landmarks) # New
+        skin_score, skin_msg = analyze_skin_tone_consistency(frame_rgb, landmarks) # New
+        
+        results_list = []
+        p1 = max(0, min(99.9, vit_score))
+        results_list.append(f"1. 통합 앙상블 판독: {'❌ AI 의심' if p1 > 70 else '✅ 정상'} ({p1:.1f}%)")
+        results_list.append(f"2. 눈동자 반사광 및 시선 모순: {eye_msg} ({eye_score:.1f}%)")
+        results_list.append(f"3. 얼굴 배치 및 해부학적 비율: {'❌ 위험' if align_score > 60 else '✅ 정상'} ({align_score:.1f}%)\n    - 분석: {align_msg}")
+        results_list.append(f"4. 피부색 일관성 및 색상 번짐: {'❌ 위험' if skin_score > 50 else '✅ 정상'} ({skin_score:.1f}%)\n    - 분석: {skin_msg}")
+        
+        lap_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+        p5 = max(0, min(98, 100 - (lap_var / 10)))
+        results_list.append(f"5. 경계면 및 잔머리 처리: {'❌ 위험' if p5 > 75 else '✅ 정상'} ({p5:.1f}%)")
 
-        # 3. FFT 주파수 분석 (Peak-to-Average Ratio)
-        dft = np.fft.fft2(gray)
-        fshift = np.fft.fftshift(dft)
-        magnitude_spectrum = 20 * np.log(np.abs(fshift) + 1)
-        
-        h, w = gray.shape
-        crow, ccol = h // 2, w // 2
-        mask = np.ones((h, w), np.uint8)
-        cv2.circle(mask, (ccol, crow), 70, 0, -1)
-        high_freq_area = magnitude_spectrum * mask
-        
-        high_freq_values = high_freq_area[high_freq_area > 0]
-        avg_freq = 0
-        if len(high_freq_values) > 0:
-            avg_val = np.mean(high_freq_values)
-            max_val = np.max(high_freq_values)
-            avg_freq = max_val / (avg_val + 1e-5)
+        # FFT 분석
+        dft = np.fft.fft2(gray); fshift = np.fft.fftshift(dft); mag = 20 * np.log(np.abs(fshift) + 1); h, w = gray.shape; crow, ccol = h // 2, w // 2
+        mask = np.ones((h, w), np.uint8); cv2.circle(mask, (ccol, crow), 70, 0, -1)
+        hfv = (mag * mask)[mag * mask > 0]
+        avg_freq = np.max(hfv) / (np.mean(hfv) + 1e-5) if len(hfv) > 0 else 0
+        p9 = max(0, min(99.9, (avg_freq - 1.8) * 150))
+        results_list.append(f"9. SynthID(FFT) 노이즈: {'❌ 위험' if p9 > 50 else '✅ 정상'} ({p9:.1f}%)")
 
-        # 4. 기타 지표 (Laplacian 등)
-        laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-        color_std = np.std(frame)
+        # 종합 판정 (새로운 지표들 반영)
+        total_prob = round(np.mean([p1, eye_score, align_score, skin_score, p5, p9]), 2)
+        results_list.append(f"10. 종합 생성 패턴: {'❌ 위험' if total_prob > 60 else '✅ 정상'} ({total_prob:.1f}%)")
 
-        # 리포트 작성 (10대 심층 분석 항목)
-        results = []
-        p1 = min(99, vit_score * 1.1)
-        results.append(f"1. ViT 심층 판독: {'❌ AI 의심' if p1 > 70 else '✅ 정상'} ({p1:.1f}%)")
-        
-        p2 = min(95, (1000 / (laplacian_var + 1)) * 5)
-        results.append(f"2. 미세 유체(선명도): {'⚠️ 주의' if p2 > 70 else '✅ 정상'} ({p2:.1f}%)")
-        
-        p3 = min(98, (100 - gram_val) * 0.5 + 20)
-        results.append(f"3. Gram 질감: {'⚠️ 주의' if p3 > 60 else '✅ 정상'} ({p3:.1f}%)")
-        
-        p4 = min(99, 100 - (laplacian_var / 5))
-        results.append(f"4. 텍스트 정밀도: {'❌ 위험' if p4 > 80 else '✅ 정상'} ({p4:.1f}%)")
-        
-        p5 = min(94, color_std * 0.5) # 이미지 버전으로 단순화
-        results.append(f"5. 색상 일관성: {'⚠️ 주의' if p5 > 60 else '✅ 정상'} ({p5:.1f}%)")
-        
-        p6 = min(96, (150 / (laplacian_var + 1)) * 10)
-        results.append(f"6. 경계면 처리: {'❌ 위험' if p6 > 75 else '✅ 정상'} ({p6:.1f}%)")
-        
-        p7 = min(99, avg_freq * 10) # FFT 기반 고주파 분석
-        results.append(f"7. 고주파 아티팩트: {'❌ 위험' if p7 > 85 else '✅ 정상'} ({p7:.1f}%)")
-        
-        p8 = p1 * 0.8 + p5 * 0.2
-        results.append(f"8. 의미론적 오류: {'⚠️ 주의' if p8 > 70 else '✅ 정상'} ({p8:.1f}%)")
+        # YOLO 시각화
+        detection_frame = frame_bgr.copy()
+        if YOLO_AVAILABLE:
+            yolo_results = yolo_model(image_path, verbose=False)
+            box_color = (0, 255, 0) if total_prob <= 40 else (0, 255, 255) if total_prob <= 70 else (0, 0, 255)
+            for r in yolo_results:
+                for box in r.boxes:
+                    if int(box.cls[0]) == 0:
+                        x1, y1, x2, y2 = map(int, box.xyxy[0])
+                        label_text = f"Person (AI Risk: {total_prob}%)"
+                        cv2.rectangle(detection_frame, (x1, y1), (x2, y2), box_color, 3)
+                        cv2.rectangle(detection_frame, (x1, y1 - 25), (x1 + 240, y1), box_color, -1)
+                        cv2.putText(detection_frame, label_text, (x1 + 5, y1 - 7), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
 
-        p9 = min(99.9, max(0, (avg_freq - 1.8) * 150))
-        results.append(f"9. SynthID(FFT): {'❌ 위험' if p9 > 50 else '✅ 정상'} ({p9:.1f}%)\n    - 근거: 주파수 피크 비율 {avg_freq:.2f}")
+        mag_norm = np.uint8(cv2.normalize(mag, None, 0, 255, cv2.NORM_MINMAX))
+        final_image = cv2.cvtColor(detection_frame, cv2.COLOR_BGR2RGB)
+        return total_prob, "📊 [포렌식 정밀 분석 리포트]\n\n" + "\n\n".join(results_list), mag_norm, final_image
+    except Exception as e: return 0, f"오류: {str(e)}", None, None
 
-        p10 = min(99.9, (p1 + p3 + p9) / 3) # 종합 판정 지표
-        results.append(f"10. 종합 생성 패턴: {'❌ 위험' if p10 > 60 else '✅ 정상'} ({p10:.1f}%)")
+# 성능 보고서 및 통합 함수 (유지)
+def export_performance_report():
+    tp, fp, fn, tn = performance_history["TP"], performance_history["FP"], performance_history["FN"], performance_history["TN"]
+    total = tp + fp + fn + tn
+    if total == 0: return "데이터 부족"
+    report = f"========== 성능 평가 결과 ==========\nAccuracy: {((tp+tn)/total)*100:.2f}%\nPrecision: {(tp/(tp+fp) if tp+fp>0 else 0)*100:.2f}%\nRecall: {(tp/(tp+fn) if tp+fn>0 else 0)*100:.2f}%  ← 핵심\n------------------------------------\nTP: {tp:02d} FP: {fp:02d} FN: {fn:02d} TN: {tn:02d}\n===================================="
+    d_path = os.path.join(os.path.expanduser("~"), "Downloads", "performance_report.md")
+    with open(d_path, "w", encoding="utf-8") as f: f.write(report)
+    return f"✅ 저장 완료: {d_path}\n\n{report}"
 
-        total_prob = round(np.mean([p1, p2, p3, p4, p5, p6, p7, p8, p9, p10]), 2)
-        
-        # FFT 스펙트럼 이미지를 Gradio에 표시하기 위해 정규화
-        mag_norm = np.uint8(cv2.normalize(magnitude_spectrum, None, 0, 255, cv2.NORM_MINMAX))
-        
-        return total_prob, "📊 [10대 심층 분석 리포트]\n\n" + "\n\n".join(results), mag_norm
-    except Exception as e:
-        return 0, f"분석 중 오류 발생: {str(e)}", None
+def process_service(input_file, ground_truth):
+    if not input_file: return None, None, "❌ 오류", "", ""
+    start = time.time(); prob, report, fft_img, det_img = analyze_image_ai(input_file); inf_time = time.time() - start
+    prediction = "AI" if prob > 50 else "Real"
+    performance_history["count"] += 1; performance_history["total_time"] += inf_time
+    if ground_truth == "AI":
+        if prediction == "AI": performance_history["TP"] += 1
+        else: performance_history["FN"] += 1
+    else:
+        if prediction == "AI": performance_history["FP"] += 1
+        else: performance_history["TN"] += 1
+    return det_img, fft_img, f"🔍 판정: {prob}% AI 의심", report, f"누적 테스트: {performance_history['count']}"
 
-# 4. 통합 실행 함수
-def process_service(input_file):
-    if not input_file:
-        return None, None, "❌ 오류: 파일을 업로드해 주세요.", ""
-    
-    try:
-        # C2PA 검사 (1단계)
-        c2pa_prob, c2pa_msg = check_c2pa_metadata(input_file)
-        if c2pa_prob is not None and c2pa_prob > 0:
-            return input_file, None, f"🔍 1단계 판정: {c2pa_msg}", f"디지털 지문 결과: {c2pa_prob}%"
-
-        # AI 분석 (2단계)
-        prob, report, fft_img = analyze_image_ai(input_file)
-        result_msg = f"🔍 최종 판정: 이 이미지는 {prob}% 확률로 AI 생성물로 의심됩니다."
-        return input_file, fft_img, result_msg, report
-    except Exception as e:
-        return None, None, f"❌ 시스템 오류: {str(e)}", ""
-
-# 5. Gradio UI
+# UI 구성 (유지)
 with gr.Blocks() as demo:
-    gr.Markdown("# 🎨 AI Image Detector: 10-Point Analysis")
-    gr.Markdown("기존 영상 분석기를 이미지 전용으로 전환한 하이브리드 탐지기입니다. (ViT, Gram-Net, FFT 적용)")
-    
+    gr.Markdown("# 🎨 AI Image Detector: Advanced Forensic & Anatomy Mode")
     with gr.Row():
-        file_input = gr.Image(label="이미지 업로드", type="filepath")
-
-    with gr.Row():
-        image_output = gr.Image(label="분석 대상 이미지")
-        fft_output = gr.Image(label="주파수 스펙트럼 (FFT)")
-
-    with gr.Row():
-        result_output = gr.Textbox(label="판정 결과", interactive=False)
-        detail_output = gr.Textbox(label="10대 심층 분석 리포트", interactive=False, lines=20)
-
-    submit_btn = gr.Button("이미지 AI 분석 시작", variant="primary")
-    submit_btn.click(fn=process_service, inputs=[file_input], outputs=[image_output, fft_output, result_output, detail_output])
+        with gr.Column(scale=1):
+            file_input = gr.Image(label="이미지 업로드", type="filepath")
+            ground_truth_input = gr.Radio(["Real", "AI"], label="실제 정답", value="Real")
+            submit_btn = gr.Button("🚀 포렌식/해부학 정밀 분석 시작", variant="primary")
+            report_btn = gr.Button("📊 보고서 생성", variant="secondary")
+            report_display = gr.Textbox(label="보고서 미리보기", interactive=False, lines=10)
+        with gr.Column(scale=1):
+            image_output = gr.Image(label="Forensic Analysis (YOLO & Anatomy)")
+            status_output = gr.Textbox(label="누적 기록", interactive=False)
+            result_output = gr.Textbox(label="최종 판정", interactive=False)
+            fft_output = gr.Image(label="주파수 스펙트럼 (FFT)")
+    with gr.Row(): detail_output = gr.Textbox(label="정밀 분석 리포트", interactive=False, lines=15)
+    submit_btn.click(fn=process_service, inputs=[file_input, ground_truth_input], outputs=[image_output, fft_output, result_output, detail_output, status_output])
+    report_btn.click(fn=export_performance_report, outputs=[report_display])
 
 if __name__ == "__main__":
-    print(f"Using device: {device}")
     demo.launch(debug=True, share=True, theme=gr.themes.Soft())
