@@ -1,0 +1,10 @@
+yt-dlp
+opencv-python
+torch
+numpy
+gradio
+torchvision
+Pillow
+librosa
+transformers
+c2pa-python
