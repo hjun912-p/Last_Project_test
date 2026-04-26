@@ -25,7 +25,7 @@ from sklearn.metrics import (
 # 설정 — 여기만 수정하면 됩니다
 # ============================================================
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 DATASET_AI_DIR   = os.path.join(_ROOT, "test_dataset", "ai")
 DATASET_REAL_DIR = os.path.join(_ROOT, "test_dataset", "real")
 
