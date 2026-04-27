@@ -63,3 +63,18 @@ venv.bak/
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# 학습 데이터 (용량 큰 이미지/영상 데이터셋 제외)
+data/
+
+# 임시 파일
+temp_*.png
+temp_*.jpg
+temp_*.mp4
+
+# 테스트 데이터셋 (Google Drive 별도 관리)
+test_dataset/
+test_dataset.zip
+
+# 노트북 헬퍼 스크립트 (임시 생성)
+members/woochul/add_*.py
