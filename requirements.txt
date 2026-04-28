@@ -8,3 +8,9 @@ Pillow
 librosa
 transformers
 c2pa-python
+google-genai
+instaloader
+requests
+python-dotenv
+PyWavelets
+scipy
