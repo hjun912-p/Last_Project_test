@@ -1,0 +1,9 @@
+gradio
+instaloader
+c2pa-python
+google-generativeai
+torch
+torchvision
+opencv-python
+python-dotenv
+pillow

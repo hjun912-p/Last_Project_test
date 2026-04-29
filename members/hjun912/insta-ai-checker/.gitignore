@@ -1,0 +1,20 @@
+# Temporary media files
+temp/
+artifacts/visualizations/
+*.mp4
+*.jpg
+*.jpeg
+*.png
+*.webp
+
+# Python environment and cache
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+venv/
+env/
+
+# Data and large model artifacts (if needed)
+# artifacts/codebook/*.npz  # 만약 코드북을 포함하고 싶지 않다면 주석 해제

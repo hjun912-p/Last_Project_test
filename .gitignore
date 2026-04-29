@@ -81,3 +81,6 @@ members/woochul/add_*.py
 
 # 팀원 AI 링크 수집 파일 (개인 보관용)
 members/**/신우철_AI_링크_20개.txt
+
+# 대용량 파일 제외
+*.pth
