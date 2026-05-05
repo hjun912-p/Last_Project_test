@@ -1,6 +1,6 @@
 # ================================================================
 # Team Shared Python Requirements
-# Source: 박효준 + 진민경 + 신우철 pip environments
+# Source: 박효준 + 진민경 pip environments
 # Purpose: LLM/RAG + CV + Multimodal + Fine-tuning + Data Science
 # Last updated: 2026-05-05
 #
@@ -18,7 +18,6 @@
 #   2. xformers는 torch 버전 호환 확인 후 별도 설치 (주석 처리)
 #   3. opencv: GUI 환경 = opencv-contrib-python
 #             서버 환경 = opencv-python-headless (동시 설치 불가)
-#             (기존 requirements.txt의 opencv-python은 contrib로 대체)
 #   4. Windows 전용 패키지는 맨 아래 주석 참고
 #   5. KoNLPy 사용 시 JDK 1.7 이상 별도 설치 필요
 # ================================================================
@@ -121,7 +120,6 @@ google-api-core==2.30.3
 google-api-python-client==2.194.0
 google-auth==2.49.2
 google-auth-httplib2==0.3.1
-google-cloud-aiplatform
 googleapis-common-protos==1.74.0
 grpcio==1.80.0
 grpcio-status==1.71.2
@@ -148,7 +146,6 @@ c2pa-python==0.32.3
 videoseal==1.0.1
 imageio==2.37.3
 tifffile==2026.3.3
-PyWavelets
 
 # ================================================================
 # [8] Video / Audio Processing
