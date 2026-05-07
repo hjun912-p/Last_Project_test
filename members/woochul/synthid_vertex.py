@@ -15,7 +15,7 @@ LOCATION   = "us-central1"
 # Vertex AI SDK는 선택적 임포트 (미설치 환경 대비)
 try:
     import vertexai
-    from vertexai.preview.vision_models import ImageGenerationModel
+    from vertexai.preview.vision_models import WatermarkVerificationModel
     from vertexai.preview.vision_models import Image as VertexImage
     VERTEX_AVAILABLE = True
 except ImportError:
@@ -64,14 +64,14 @@ def detect_synthid_vertex(image: Image.Image) -> tuple:
         vertex_image = VertexImage(image_bytes=img_bytes)
 
         # 모델 로드 및 탐지
-        model = ImageGenerationModel.from_pretrained("imagegeneration@006")
+        model = WatermarkVerificationModel.from_pretrained("imageverification@001")
 
         t0 = time.time()
-        response = model.detect_watermark(vertex_image)
+        response = model.verify_image(vertex_image)
         elapsed = round(time.time() - t0, 3)
 
         # 결과 파싱 — SDK 버전에 따라 enum 또는 string으로 반환되므로 둘 다 처리
-        confidence_raw = response.watermark_detection_result.confidence
+        confidence_raw = response.watermark_verification_result
         # enum 객체면 .name 속성으로 문자열 추출, 아니면 str() 변환
         if hasattr(confidence_raw, "name"):
             confidence_str = confidence_raw.name
