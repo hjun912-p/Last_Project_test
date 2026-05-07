@@ -1,0 +1,5 @@
+﻿model,accuracy,precision,recall,f1,fpr,avg_time,tp,fp,fn,tn,n_total,n_failed
+umm-maybe/AI-image-detector,26.36,5.68,9.9,7.22,66.94,0.566,10,166,91,82,349,1
+Organika/sdxl-detector,77.08,59.13,67.33,62.96,18.95,0.449,68,47,33,201,349,1
+haywoodsloan/ai-image-detector-deploy,88.25,75.86,87.13,81.11,11.29,0.828,88,28,13,220,349,1
+prithivMLmods/Deep-Fake-Detector-Model,30.66,17.81,38.61,24.38,72.58,0.257,39,180,62,68,349,1
