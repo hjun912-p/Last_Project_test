@@ -1,0 +1,21 @@
+name: insight
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+    - gradio>=4.0.0
+    - Pillow>=10.0.0
+    - numpy>=1.24.0
+    - opencv-contrib-python>=4.8.0
+    - PyWavelets>=1.4.0
+    - scipy>=1.11.0
+    - google-genai>=0.7.0
+    - google-cloud-aiplatform>=1.44.0
+    - requests>=2.31.0
+    - instaloader>=4.10.0
+    - yt-dlp>=2024.1.0
+    - python-dotenv>=1.0.0
+    - c2pa-python>=0.7.0

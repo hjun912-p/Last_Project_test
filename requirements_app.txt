@@ -1,0 +1,30 @@
+# ================================================================
+# InSIGHT 앱 전용 requirements
+# 설치: pip install -r requirements_app.txt
+# 권장: conda 환경 사용 (environment_app.yml 참고)
+# ================================================================
+
+# UI
+gradio>=4.0.0
+
+# 이미지 처리
+Pillow>=10.0.0
+numpy>=1.24.0
+opencv-contrib-python>=4.8.0
+PyWavelets>=1.4.0
+scipy>=1.11.0
+
+# Google AI
+google-genai>=0.7.0
+google-cloud-aiplatform>=1.44.0
+
+# SNS 다운로드
+requests>=2.31.0
+instaloader>=4.10.0
+yt-dlp>=2024.1.0
+
+# 환경변수
+python-dotenv>=1.0.0
+
+# C2PA 출처 검증 (선택)
+c2pa-python>=0.7.0

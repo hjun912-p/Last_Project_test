@@ -12,6 +12,7 @@ import requests
 from google import genai
 from google.genai import types
 from synthid_detector import detect_synthid
+from synthid_vertex import detect_synthid_vertex, VERTEX_AVAILABLE
 
 load_dotenv()
 
@@ -109,6 +110,11 @@ def check_exif(image: Image.Image) -> tuple[bool | None, str]:
         return None, "🔍 EXIF: 분석 불가"
 
 def check_synthid(image: Image.Image) -> tuple[bool | None, str]:
+    # Vertex AI 공식 SynthID 우선 시도, 실패 시 역공학 근사로 폴백
+    if VERTEX_AVAILABLE:
+        result, msg, _, _ = detect_synthid_vertex(image)
+        if "오류" not in msg:
+            return result, msg
     return detect_synthid(image)
 
 def run_filter_1(image_path: str, image: Image.Image) -> tuple[bool, str]:
@@ -154,17 +160,18 @@ GEMINI_PROMPT = """이 이미지가 AI가 생성한 이미지인지 분석해주
 신뢰도: 0~100%
 근거: (2~3문장 한국어로)"""
 
-def run_filter_2(image: Image.Image, api_key: str) -> tuple[bool | None, str]:
+AVAILABLE_MODELS = ["gemini-2.5-flash", "gemini-3.1-flash"]
+
+def run_filter_2(image: Image.Image, api_key: str, model: str = "gemini-2.5-flash") -> tuple[bool | None, str]:
     if not api_key.strip():
         return None, "❌ Gemini API Key를 입력해주세요."
     try:
         client = genai.Client(api_key=api_key.strip())
-        # PIL Image → JPEG bytes
         buf = BytesIO()
         image.save(buf, format="JPEG")
         img_bytes = buf.getvalue()
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model=model,
             contents=[
                 GEMINI_PROMPT,
                 types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"),
@@ -172,16 +179,16 @@ def run_filter_2(image: Image.Image, api_key: str) -> tuple[bool | None, str]:
         )
         text = response.text.strip()
         is_ai = "AI 생성" in text and "실제 이미지" not in text.split("판정:")[1][:20]
-        return is_ai, f"[2차 필터 — Gemini 2.5 Flash]\n\n{text}"
+        return is_ai, f"[2차 필터 — {model}]\n\n{text}"
     except Exception as e:
-        return None, f"[2차 필터 — Gemini 2.5 Flash]\n\n❌ 오류: {str(e)}"
+        return None, f"[2차 필터 — {model}]\n\n❌ 오류: {str(e)}"
 
 
 # ────────────────────────────────────────────────
 # 메인 처리
 # ────────────────────────────────────────────────
 
-def process(url: str, uploaded_file, api_key: str):
+def process(url: str, uploaded_file, api_key: str, model: str = "gemini-2.5-flash"):
     image: Image.Image | None = None
     image_path: str | None = None
     tmp_path: str | None = None
@@ -207,7 +214,7 @@ def process(url: str, uploaded_file, api_key: str):
             verdict = "❌ AI 생성 이미지 확인 (1차 필터)"
             report_2 = "1차 필터에서 감지되어 2차 필터를 생략했습니다."
         else:
-            is_ai_2, report_2 = run_filter_2(image, api_key)
+            is_ai_2, report_2 = run_filter_2(image, api_key, model)
             if is_ai_2 is True:
                 verdict = "❌ AI 생성 이미지 확인 (2차 필터)"
             elif is_ai_2 is False:
@@ -230,7 +237,7 @@ def process(url: str, uploaded_file, api_key: str):
 
 with gr.Blocks(title="InSIGHT", theme=gr.themes.Soft()) as demo:
     gr.Markdown("# 🔍 InSIGHT — AI 생성 이미지 탐지기")
-    gr.Markdown("Instagram URL 또는 이미지 파일을 입력하면 1차(C2PA/EXIF/SynthID) → 2차(Gemini 2.5 Flash) 순으로 분석합니다.")
+    gr.Markdown("Instagram URL 또는 이미지 파일을 입력하면 1차(C2PA/EXIF/SynthID) → 2차(Gemini Flash) 순으로 분석합니다.")
 
     with gr.Row():
         with gr.Column(scale=1):
@@ -248,6 +255,11 @@ with gr.Blocks(title="InSIGHT", theme=gr.themes.Soft()) as demo:
                 placeholder="AIza...",
                 value=os.getenv("GEMINI_API_KEY", "")
             )
+            model_radio = gr.Radio(
+                choices=AVAILABLE_MODELS,
+                value=AVAILABLE_MODELS[0],
+                label="2차 필터 모델 선택",
+            )
             submit_btn = gr.Button("분석 시작", variant="primary", size="lg")
 
         with gr.Column(scale=1):
@@ -261,13 +273,13 @@ with gr.Blocks(title="InSIGHT", theme=gr.themes.Soft()) as demo:
             interactive=False, lines=10
         )
         filter2_output = gr.Textbox(
-            label="2차 필터 (Gemini 2.5 Flash)",
+            label="2차 필터 (Gemini Flash)",
             interactive=False, lines=10
         )
 
     submit_btn.click(
         fn=process,
-        inputs=[url_input, file_input, api_key_input],
+        inputs=[url_input, file_input, api_key_input, model_radio],
         outputs=[verdict_output, filter1_output, filter2_output, image_preview]
     )
 

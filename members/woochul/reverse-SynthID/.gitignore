@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+*.npy
+*.pkl
+!artifacts/codebook/*.pkl
+
+# Large codebook artifacts — upload manually via HF or GitHub UI
+artifacts/spectral_codebook_v4.npz
+
+# Reference images (hosted on HF: https://huggingface.co/datasets/aoxo/reverse-synthid)
+gemini_black/
+gemini_white/
+gemini_random/
+gemini_black_nb_pro/
+gemini_white_nb_pro/
+runs/
+
+# Secrets
+.env
+
+# Temporary
+*.tmp
+*.log
+_temp_*
+_output_*
+push_randomly.sh
+synthid_bypass.py.final
