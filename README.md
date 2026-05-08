@@ -67,22 +67,6 @@ conda activate insight
 python setup_models.py
 ```
 
-### 4단계 — 환경변수 설정
-
-```bash
-cp .env.example .env
-```
-
-`.env` 파일을 열어서 아래 값을 입력합니다:
-
-```
-GEMINI_API_KEY=발급받은_키_입력
-GOOGLE_APPLICATION_CREDENTIALS=서비스계정_JSON_파일_경로
-INSTAGRAM_USERNAME=인스타그램_아이디
-```
-
-> API 키 발급 방법 → [설명서.md](설명서.md) 참고
-
 ### 4단계 — 앱 실행
 
 ```bash
@@ -105,7 +89,6 @@ Last_Project_test/
 ├── .env.example             # 환경변수 예시 (복사 후 .env로 사용)
 ├── .env                     # 실제 환경변수 (git 제외, 직접 생성)
 ├── README.md                # 프로젝트 소개 (현재 파일)
-├── 설명서.md                 # 상세 설치 가이드
 ├── PIPELINE.md              # 탐지 파이프라인 설명
 ├── members/                 # 팀원별 작업 폴더
 │   ├── woochul/
@@ -128,7 +111,6 @@ Last_Project_test/
 | `environment_app.yml` | 팀원 전체 공통 conda 환경 (Python 3.11) |
 | `requirements_app.txt` | pip만 사용할 경우의 패키지 목록 |
 | `.env.example` | 환경변수 템플릿. 복사해서 `.env` 로 사용 |
-| `설명서.md` | API 키 발급, Vertex AI 설정 등 상세 가이드 |
 
 ---
 
