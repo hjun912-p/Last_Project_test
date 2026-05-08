@@ -79,6 +79,8 @@ sys.path.insert(0, str(ROOT))
 
 from synthid_detector import detect_synthid
 from synthid_vertex import detect_synthid_vertex, VERTEX_AVAILABLE
+from videofact_wrapper import detect_videofact_score
+from freqnet_wrapper import detect_freqnet_score
 
 # ── 설정 ──────────────────────────────────────────────────
 
@@ -281,13 +283,42 @@ def _s1_watermark(image: Image.Image) -> tuple[float, list[str]]:
     indicators.append(f"역공학 SynthID: 미감지 — {first}")
     return 0.0, indicators
 
+def _s1_videofact(image: Image.Image) -> tuple[float, list[str]]:
+    indicators: list[str] = []
+    try:
+        score = detect_videofact_score(image)
+        indicators.append(f"VideoFact (WACV 2024) 분석 완료: 스코어 {score:.4f}")
+        indicators.append("디지털 포렌식 흔적(Forensic Traces) 및 장면 문맥(Scene Context) 분석")
+        indicators.append("픽셀 노이즈, 압축 아티팩트, 미세 불일치 정밀 감지")
+        return score, indicators
+    except Exception as e:
+        indicators.append(f"VideoFact 분석 중 오류 발생: {e}")
+        return 0.0, indicators
+
+def _s1_freqnet(image: Image.Image) -> tuple[float, list[str]]:
+    indicators: list[str] = []
+    try:
+        score = detect_freqnet_score(image)
+        indicators.append(f"FreqNet (AAAI 2024) 분석 완료: 스코어 {score:.4f}")
+        indicators.append("주파수 영역(Frequency Space) 도메인 학습 기반 탐지")
+        indicators.append("눈에 보이지 않는 주파수 성분의 위조 흔적 정밀 분석")
+        return score, indicators
+    except Exception as e:
+        indicators.append(f"FreqNet 분석 중 오류 발생: {e}")
+        return 0.0, indicators
+
 def run_stage1(image: Image.Image, image_path: str) -> dict:
     t0 = time.time()
     exif_score, exif_ind = _s1_exif(image)
     c2pa_score, c2pa_ind = _s1_c2pa(image_path)
     wm_score,   wm_ind   = _s1_watermark(image)
+    vf_score,   vf_ind   = _s1_videofact(image)
+    fn_score,   fn_ind   = _s1_freqnet(image)
 
-    score = exif_score * 0.40 + c2pa_score * 0.35 + wm_score * 0.25
+    # 가중치 재조정 (VideoFact + FreqNet 추가)
+    # EXIF(0.15) + C2PA(0.15) + Watermark(0.15) + VideoFact(0.25) + FreqNet(0.30)
+    score = (exif_score * 0.15 + c2pa_score * 0.15 + wm_score * 0.15 + 
+             vf_score * 0.25 + fn_score * 0.30)
     score = round(min(score, 1.0), 4)
 
     return {
@@ -300,6 +331,8 @@ def run_stage1(image: Image.Image, image_path: str) -> dict:
             "exif":      {"score": exif_score, "indicators": exif_ind},
             "c2pa":      {"score": c2pa_score, "indicators": c2pa_ind},
             "watermark": {"score": wm_score,   "indicators": wm_ind},
+            "videofact": {"score": vf_score,   "indicators": vf_ind},
+            "freqnet":   {"score": fn_score,   "indicators": fn_ind},
         },
     }
 
@@ -468,9 +501,14 @@ def fmt_stage1(r: dict) -> str:
     out.append(f"  종합 점수  {_bar(r['score'])}  →  {r['verdict']}")
     out.append(f"  소요 시간  {r['elapsed']}s  |  비용  $0.0000  (로컬 처리)")
     out.append("")
-    label = {"exif": "EXIF 분석", "c2pa": "C2PA 출처", "watermark": "SynthID 역공학"}
+    label = {
+        "exif":      "EXIF 분석     ", 
+        "c2pa":      "C2PA 출처     ", 
+        "watermark": "SynthID 역공학",
+        "videofact": "VideoFact(WACV)"
+    }
     for key, data in r["checks"].items():
-        out.append(f"  {label[key]:<14} {_bar(data['score'], 14)}")
+        out.append(f"  {label.get(key, key):<14} {_bar(data['score'], 14)}")
         for ind in data["indicators"]:
             out.append(f"    • {ind}")
     out.append("")

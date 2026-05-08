@@ -59,7 +59,15 @@ conda env create -f environment_app.yml
 conda activate insight
 ```
 
-### 3단계 — 환경변수 설정
+### 3단계 — 모델 가중치 설치 (필수)
+
+이 프로젝트는 고성능 AI 모델을 사용합니다. 용량이 커서 깃허브에 직접 올리지 못하니, 설치 후 아래 명령어를 입력해 모델을 한 번에 다운로드하세요:
+
+```bash
+python setup_models.py
+```
+
+### 4단계 — 환경변수 설정
 
 ```bash
 cp .env.example .env
