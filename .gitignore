@@ -64,6 +64,9 @@ venv.bak/
 .DS_Store
 Thumbs.db
 
+# Obsidian (로컬 개인 에디터 설정)
+.obsidian/
+
 # 학습 데이터 (용량 큰 이미지/영상 데이터셋 제외)
 data/
 
