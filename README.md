@@ -28,7 +28,9 @@
    ── Stage 1 (무료, 로컬) ───────────────────
    C2PA 출처 서명 검증
    EXIF AI 도구 흔적 확인
-   SynthID 역공학 워터마크 탐지 (CVR + 위상 분석)
+   SynthID 역공학 워터마크 탐지 (CVR 분석)
+   VideoFact (포렌식 흔적 & 장면 문맥 분석)
+   FreqNet (주파수 성분 위조 패턴 탐지)
         ↓
    ── Stage 2 (Vertex AI) ────────────────────
    Google 공식 SynthID Detector API
