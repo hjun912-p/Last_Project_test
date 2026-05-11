@@ -74,8 +74,6 @@ sys.path.insert(0, str(ROOT))
 from videofact_wrapper import detect_videofact_score
 from freqnet_wrapper import detect_freqnet_score
 
-BENCHMARK_DIR = ROOT / "members" / "woochul" / "benchmark"
-sys.path.insert(0, str(BENCHMARK_DIR))
 try:
     from ensemble_detector import EnsembleDetector
     ENSEMBLE_AVAILABLE = True
