@@ -14,9 +14,13 @@ opencv-contrib-python>=4.8.0
 PyWavelets>=1.4.0
 scipy>=1.11.0
 
-# Google AI
+# 앙상블 ViT 모델 (haywoodsloan/ai-image-detector-deploy + Organika/sdxl-detector)
+torch>=2.0.0
+torchvision>=0.15.0
+transformers>=4.35.0
+
+# Google AI (Gemini)
 google-genai>=0.7.0
-google-cloud-aiplatform>=1.44.0
 
 # SNS 다운로드
 requests>=2.31.0

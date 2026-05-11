@@ -1,5 +1,6 @@
-name: hnf
+name: insight
 channels:
+  - pytorch
   - conda-forge
   - defaults
 dependencies:
@@ -12,8 +13,10 @@ dependencies:
     - opencv-contrib-python>=4.8.0
     - PyWavelets>=1.4.0
     - scipy>=1.11.0
+    - torch>=2.0.0
+    - torchvision>=0.15.0
+    - transformers>=4.35.0
     - google-genai>=0.7.0
-    - google-cloud-aiplatform>=1.44.0
     - requests>=2.31.0
     - instaloader>=4.10.0
     - yt-dlp>=2024.1.0
