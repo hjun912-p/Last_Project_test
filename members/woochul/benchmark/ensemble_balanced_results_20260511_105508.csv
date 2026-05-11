@@ -1,0 +1,2 @@
+﻿model,accuracy,precision,recall,f1,fpr,avg_time,tp,fp,fn,tn,n_total,n_failed
+"Ensemble Balanced(deploy w=0.6 + sdxl w=0.4, thr=0.5, n=100+100)",88.94,87.5,91.0,89.22,13.13,0.734,91,13,9,86,199,1

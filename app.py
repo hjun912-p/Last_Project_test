@@ -1,12 +1,12 @@
 """
 InSIGHT — AI 생성 이미지/영상 판별기 (로컬 데모 버전)
-Instagram / YouTube 링크 또는 이미지 파일 → 3단계 분석 → 증거 기반 판정
+Instagram / YouTube 링크 또는 이미지 파일 → 2단계 분석 → 증거 기반 판정
 
 실행:
     conda activate insight
     python app.py
 
-환경변수: .env 파일에 GEMINI_API_KEY, GOOGLE_APPLICATION_CREDENTIALS 설정
+환경변수: .env 파일에 GEMINI_API_KEY 설정
 """
 
 import os
@@ -14,6 +14,7 @@ import re
 import sys
 import time
 import json
+import base64
 import tempfile
 from io import BytesIO
 from pathlib import Path
@@ -65,37 +66,28 @@ try:
 except ImportError:
     GENAI_AVAILABLE = False
 
-try:
-    import vertexai
-    from vertexai.generative_models import GenerativeModel, Part as VertexPart
-    VERTEXAI_GENAI_AVAILABLE = True
-except ImportError:
-    VERTEXAI_GENAI_AVAILABLE = False
-
 # ── 로컬 모듈 ─────────────────────────────────────────────
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-from synthid_detector import detect_synthid
-from synthid_vertex import detect_synthid_vertex, VERTEX_AVAILABLE
 from videofact_wrapper import detect_videofact_score
 from freqnet_wrapper import detect_freqnet_score
 
+BENCHMARK_DIR = ROOT / "members" / "woochul" / "benchmark"
+sys.path.insert(0, str(BENCHMARK_DIR))
+try:
+    from ensemble_detector import EnsembleDetector
+    ENSEMBLE_AVAILABLE = True
+except ImportError:
+    ENSEMBLE_AVAILABLE = False
+
+_ensemble_instance = None
+
 # ── 설정 ──────────────────────────────────────────────────
 
-PROJECT_ID = "insight-494801"
-LOCATION   = "us-central1"
-
 STAGE1_THRESHOLD = 0.80
-
-SYNTHID_SCORE_MAP = {
-    "VERY_LIKELY":   0.95,
-    "LIKELY":        0.75,
-    "POSSIBLE":      0.50,
-    "UNLIKELY":      0.25,
-    "VERY_UNLIKELY": 0.05,
-}
+OLLAMA_BASE_URL  = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
 MODEL_CONFIGS: dict[str, dict] = {
     "gemini_flash": {
@@ -104,17 +96,23 @@ MODEL_CONFIGS: dict[str, dict] = {
         "api":            "google_genai",
         "cost_per_image": 0.0001,
     },
-    "gemma4": {
-        "display":        "Gemma 4",
-        "model_id":       "gemma-3-27b-it",
-        "api":            "vertexai",
-        "cost_per_image": 0.0003,
+    "gemini_flash3": {
+        "display":        "Gemini 3 Flash",
+        "model_id":       "gemini-3-flash-preview",
+        "api":            "google_genai",
+        "cost_per_image": 0.0001,
     },
-    "vertexai": {
-        "display":        "VertexAI Gemini",
-        "model_id":       "gemini-2.5-flash",
-        "api":            "vertexai",
-        "cost_per_image": 0.001,
+    "gemma4": {
+        "display":        "Gemma 4 (Ollama)",
+        "model_id":       "gemma4:e4b",
+        "api":            "ollama",
+        "cost_per_image": 0.0,
+    },
+    "ensemble": {
+        "display":        "앙상블 (ViT×2)",
+        "model_id":       "ensemble",
+        "api":            "ensemble",
+        "cost_per_image": 0.0,
     },
 }
 
@@ -210,7 +208,7 @@ def download_media(url: str) -> tuple[Image.Image, str, str]:
 
 
 # ═══════════════════════════════════════════════════════════
-# Stage 1: 메타데이터 + 비가시성 워터마크
+# Stage 1: 메타데이터 + 포렌식 분석
 # ═══════════════════════════════════════════════════════════
 
 _AI_TOOL_NAMES = [
@@ -224,7 +222,7 @@ def _s1_exif(image: Image.Image) -> tuple[float, list[str]]:
     indicators: list[str] = []
     score = 0.0
     try:
-        raw = image._getexif()
+        raw = image.getexif()          # _getexif()는 JPEG 전용 private API → 공개 API로 교체
         if not raw:
             indicators.append("EXIF 없음 — AI 생성 이미지에서 흔히 관찰됨")
             return 0.25, indicators
@@ -268,25 +266,14 @@ def _s1_c2pa(image_path: str) -> tuple[float, list[str]]:
     indicators.append("C2PA 메타데이터 없음")
     return 0.0, indicators
 
-def _s1_watermark(image: Image.Image) -> tuple[float, list[str]]:
-    indicators: list[str] = []
-    detected, msg = detect_synthid(image)
-    first = (msg or "").split("\n")[0]
-    if detected is True:
-        indicators.append(f"역공학 SynthID: 워터마크 감지 — {first}")
-        return 0.75, indicators
-    m = re.search(r'CVR[:\s=]+([0-9.]+)', msg or "")
-    if m:
-        cvr = float(m.group(1))
-        indicators.append(f"역공학 SynthID: CVR={cvr:.3f} ({'워터마크 의심' if cvr > 0.7 else '미감지'})")
-        return round(cvr * 0.4, 4), indicators
-    indicators.append(f"역공학 SynthID: 미감지 — {first}")
-    return 0.0, indicators
-
 def _s1_videofact(image: Image.Image) -> tuple[float, list[str]]:
     indicators: list[str] = []
     try:
+        import videofact_wrapper as _vfw
         score = detect_videofact_score(image)
+        if _vfw._detector is None or _vfw._detector.model is None:
+            indicators.append("VideoFact 모델 미로드 — 외부 가중치 파일 필요 (건너뜀)")
+            return 0.0, indicators
         indicators.append(f"VideoFact (WACV 2024) 분석 완료: 스코어 {score:.4f}")
         indicators.append("디지털 포렌식 흔적(Forensic Traces) 및 장면 문맥(Scene Context) 분석")
         indicators.append("픽셀 노이즈, 압축 아티팩트, 미세 불일치 정밀 감지")
@@ -298,7 +285,11 @@ def _s1_videofact(image: Image.Image) -> tuple[float, list[str]]:
 def _s1_freqnet(image: Image.Image) -> tuple[float, list[str]]:
     indicators: list[str] = []
     try:
+        import freqnet_wrapper as _fnw
         score = detect_freqnet_score(image)
+        if _fnw._detector is None or _fnw._detector.model is None:
+            indicators.append("FreqNet 모델 미로드 — 외부 가중치 파일 필요 (건너뜀)")
+            return 0.0, indicators
         indicators.append(f"FreqNet (AAAI 2024) 분석 완료: 스코어 {score:.4f}")
         indicators.append("주파수 영역(Frequency Space) 도메인 학습 기반 탐지")
         indicators.append("눈에 보이지 않는 주파수 성분의 위조 흔적 정밀 분석")
@@ -311,14 +302,12 @@ def run_stage1(image: Image.Image, image_path: str) -> dict:
     t0 = time.time()
     exif_score, exif_ind = _s1_exif(image)
     c2pa_score, c2pa_ind = _s1_c2pa(image_path)
-    wm_score,   wm_ind   = _s1_watermark(image)
     vf_score,   vf_ind   = _s1_videofact(image)
     fn_score,   fn_ind   = _s1_freqnet(image)
 
-    # 가중치 재조정 (VideoFact + FreqNet 추가)
-    # EXIF(0.15) + C2PA(0.15) + Watermark(0.15) + VideoFact(0.25) + FreqNet(0.30)
-    score = (exif_score * 0.15 + c2pa_score * 0.15 + wm_score * 0.15 + 
-             vf_score * 0.25 + fn_score * 0.30)
+    # EXIF(0.15) + C2PA(0.15) + VideoFact(0.30) + FreqNet(0.40)
+    score = (exif_score * 0.15 + c2pa_score * 0.15 +
+             vf_score * 0.30 + fn_score * 0.40)
     score = round(min(score, 1.0), 4)
 
     return {
@@ -330,7 +319,6 @@ def run_stage1(image: Image.Image, image_path: str) -> dict:
         "checks": {
             "exif":      {"score": exif_score, "indicators": exif_ind},
             "c2pa":      {"score": c2pa_score, "indicators": c2pa_ind},
-            "watermark": {"score": wm_score,   "indicators": wm_ind},
             "videofact": {"score": vf_score,   "indicators": vf_ind},
             "freqnet":   {"score": fn_score,   "indicators": fn_ind},
         },
@@ -338,48 +326,7 @@ def run_stage1(image: Image.Image, image_path: str) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════
-# Stage 2: Vertex AI SynthID Detector
-# ═══════════════════════════════════════════════════════════
-
-def run_stage2(image: Image.Image) -> dict:
-    t0 = time.time()
-    detected, msg, elapsed, cost = detect_synthid_vertex(image)
-
-    if not VERTEX_AVAILABLE or "오류" in msg or "미설치" in msg or "스킵" in msg:
-        return {
-            "score":            0.0,
-            "verdict":          "스킵 (Vertex AI 미연결)",
-            "pass_to_next":     True,
-            "elapsed":          round(time.time() - t0, 3),
-            "cost_usd":         0.0,
-            "confidence_level": "N/A",
-            "raw_msg":          msg,
-            "available":        False,
-        }
-
-    conf_level = "VERY_UNLIKELY"
-    for level in SYNTHID_SCORE_MAP:
-        if level in msg:
-            conf_level = level
-            break
-    score = SYNTHID_SCORE_MAP[conf_level]
-    verdict = "AI 생성 (SynthID)" if detected is True else (
-              "불확실" if conf_level == "POSSIBLE" else "미감지")
-
-    return {
-        "score":            round(score, 4),
-        "verdict":          verdict,
-        "pass_to_next":     True,
-        "elapsed":          elapsed,
-        "cost_usd":         cost,
-        "confidence_level": conf_level,
-        "raw_msg":          msg,
-        "available":        True,
-    }
-
-
-# ═══════════════════════════════════════════════════════════
-# Stage 3: Gemini / Gemma / VertexAI 시각 분석
+# Stage 3: Gemini / Gemma4 / 앙상블 시각 분석
 # ═══════════════════════════════════════════════════════════
 
 _STAGE3_PROMPT = """당신은 AI 생성 이미지/영상 탐지 전문가입니다.
@@ -425,19 +372,80 @@ def _call_google_genai(image: Image.Image, model_id: str, api_key: str) -> dict:
     except Exception as e:
         return {"error": str(e)}
 
-def _call_vertexai(image: Image.Image, model_id: str) -> dict:
-    if not VERTEXAI_GENAI_AVAILABLE:
-        return {"error": "google-cloud-aiplatform 미설치"}
+def _call_ollama(image: Image.Image, model_id: str) -> dict:
+    if not REQUESTS_AVAILABLE:
+        return {"error": "requests 미설치"}
     buf = BytesIO()
     image.save(buf, format="JPEG")
+    img_b64 = base64.b64encode(buf.getvalue()).decode()
     try:
-        vertexai.init(project=PROJECT_ID, location=LOCATION)
-        model = GenerativeModel(model_id)
-        resp = model.generate_content([
-            VertexPart.from_text(_STAGE3_PROMPT),
-            VertexPart.from_data(data=buf.getvalue(), mime_type="image/jpeg"),
-        ])
-        return _parse_json(resp.text)
+        resp = requests.post(
+            f"{OLLAMA_BASE_URL}/api/generate",
+            json={
+                "model":  model_id,
+                "prompt": _STAGE3_PROMPT,
+                "images": [img_b64],
+                "stream": False,
+            },
+            timeout=180,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return _parse_json(data.get("response", ""))
+    except requests.exceptions.ConnectionError:
+        return {"error": f"Ollama 서버 연결 실패 ({OLLAMA_BASE_URL}) — 'ollama serve' 실행 여부 확인"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _ensemble_explain_prompt(score_pct: float) -> str:
+    verdict = "AI 생성" if score_pct >= 50 else "실제 이미지"
+    return f"""당신은 AI 이미지 탐지 전문가입니다.
+딥러닝 앙상블 탐지 모델이 이 이미지를 AI 생성 확률 {score_pct:.1f}%로 분석했습니다 (판정: {verdict}).
+
+이미지를 직접 시각적으로 분석하여 이 판정을 뒷받침하는 시각적 근거를 구체적으로 설명하세요.
+각 특징이 얼마나 비자연스러운지 퍼센트로 추정하고, 구체적인 이유를 함께 작성하세요.
+
+반드시 아래 JSON 형식으로만 응답하세요 (다른 텍스트 없이):
+{{
+  "evidence": [
+    {{"item": "특징명: XX% — 구체적 설명", "weight": "high|medium|low"}},
+    {{"item": "특징명: XX% — 구체적 설명", "weight": "high|medium|low"}}
+  ],
+  "detail": {{
+    "texture":    "텍스처·피부·머리카락 관찰",
+    "lighting":   "조명·그림자 분석",
+    "anatomy":    "손·귀·치아 등 해부학적 이상 여부",
+    "background": "배경 일관성",
+    "artifacts":  "AI 특유 아티팩트"
+  }}
+}}
+
+evidence는 3~6개 항목으로 구성하세요."""
+
+
+def _call_ollama_explain(image: Image.Image, score_pct: float, model_id: str) -> dict:
+    if not REQUESTS_AVAILABLE:
+        return {"error": "requests 미설치"}
+    buf = BytesIO()
+    image.save(buf, format="JPEG")
+    img_b64 = base64.b64encode(buf.getvalue()).decode()
+    try:
+        resp = requests.post(
+            f"{OLLAMA_BASE_URL}/api/generate",
+            json={
+                "model":  model_id,
+                "prompt": _ensemble_explain_prompt(score_pct),
+                "images": [img_b64],
+                "stream": False,
+            },
+            timeout=180,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return _parse_json(data.get("response", ""))
+    except requests.exceptions.ConnectionError:
+        return {"error": f"Ollama 서버 연결 실패 ({OLLAMA_BASE_URL}) — 'ollama serve' 실행 여부 확인"}
     except Exception as e:
         return {"error": str(e)}
 
@@ -450,14 +458,98 @@ def _parse_json(text: str) -> dict:
             pass
     return {"raw_response": text, "parse_error": True}
 
-def run_stage3(image: Image.Image, model_key: str, api_key: str) -> dict:
+def run_ensemble(image_path: str, explain: bool = False, image: Image.Image = None) -> dict:
+    global _ensemble_instance
+    if not ENSEMBLE_AVAILABLE:
+        return {
+            "score":    0.0,
+            "verdict":  "오류: ensemble_detector 로드 실패",
+            "elapsed":  0.0,
+            "cost_usd": 0.0,
+            "analysis": {"error": "ensemble_detector 로드 실패"},
+            "model":    "앙상블 (ViT×2)",
+        }
+    t0 = time.time()
+    try:
+        if _ensemble_instance is None:
+            _ensemble_instance = EnsembleDetector()
+
+        img     = image if image is not None else Image.open(image_path).convert("RGB")
+        t_inf   = time.time()
+        detail  = _ensemble_instance.predict_scores(img)   # 모델별 점수 + ensemble 키 포함
+        elapsed = round(time.time() - t_inf, 3)
+
+        score = detail.pop("ensemble")                     # 앙상블 최종 점수
+        pred  = 1 if score >= _ensemble_instance.threshold else 0
+        thr   = _ensemble_instance.threshold
+        verdict = "AI 생성" if pred == 1 else "실제 이미지"
+
+        # 가중치 맵 (short_name → weight)
+        weight_map = {mid.split("/")[-1]: w
+                      for mid, w in _ensemble_instance.weights.items()}
+
+        # 각 모델 기여 계산
+        evidence, calc_parts = [], []
+        for short_name, m_score in detail.items():
+            w = weight_map.get(short_name, 0.0)
+            calc_parts.append(f"{m_score*100:.1f}%×{w}")
+            evidence.append({
+                "item":   f"{short_name}  →  AI 확률 {m_score*100:.1f}%  (가중치 {w})",
+                "weight": "high" if w >= 0.5 else "medium",
+            })
+
+        calc_str = " + ".join(calc_parts)
+        inference = [{
+            "item":  f"소프트 보팅 = {calc_str} = {score*100:.1f}%",
+            "basis": f"임계값 {thr} 초과 → {verdict}",
+        }]
+
+        # Gemma 시각 근거 설명 (옵션)
+        gemma_explain = None
+        if explain:
+            t_exp = time.time()
+            gemma_explain = _call_ollama_explain(img, score * 100, MODEL_CONFIGS["gemma4"]["model_id"])
+            gemma_explain["_elapsed"] = round(time.time() - t_exp, 3)
+
+        return {
+            "score":    round(score, 4),
+            "verdict":  verdict,
+            "elapsed":  elapsed,
+            "cost_usd": 0.0,
+            "analysis": {
+                "verdict":        "AI_GENERATED" if pred == 1 else "REAL",
+                "confidence_pct": round(score * 100),
+                "evidence":       evidence,
+                "inference":      inference,
+                "detail":         {},
+                "gemma_explain":  gemma_explain,
+            },
+            "model": "앙상블 (ViT×2)",
+        }
+    except Exception as e:
+        return {
+            "score":    0.0,
+            "verdict":  f"오류: {e}",
+            "elapsed":  round(time.time() - t0, 3),
+            "cost_usd": 0.0,
+            "analysis": {"error": str(e)},
+            "model":    "앙상블 (ViT×2)",
+        }
+
+def run_stage3(image: Image.Image, image_path: str, model_key: str, api_key: str, gemma_explain: bool = False) -> dict:
     cfg = MODEL_CONFIGS[model_key]
-    t0  = time.time()
+
+    if cfg["api"] == "ensemble":
+        return run_ensemble(image_path, explain=gemma_explain, image=image)
+
+    t0 = time.time()
 
     if cfg["api"] == "google_genai":
         analysis = _call_google_genai(image, cfg["model_id"], api_key)
+    elif cfg["api"] == "ollama":
+        analysis = _call_ollama(image, cfg["model_id"])
     else:
-        analysis = _call_vertexai(image, cfg["model_id"])
+        analysis = {"error": f"알 수 없는 API: {cfg['api']}"}
 
     elapsed = round(time.time() - t0, 3)
 
@@ -492,46 +584,63 @@ def run_stage3(image: Image.Image, model_key: str, api_key: str) -> dict:
 # 결과 포매터
 # ═══════════════════════════════════════════════════════════
 
+_S1_WEIGHTS = {"exif": 0.15, "c2pa": 0.15, "videofact": 0.30, "freqnet": 0.40}
+_S1_LABELS  = {
+    "exif":      ("①", "EXIF 분석      "),
+    "c2pa":      ("②", "C2PA 출처      "),
+    "videofact": ("③", "VideoFact(WACV)"),
+    "freqnet":   ("④", "FreqNet(AAAI)  "),
+}
+
 def _bar(score: float, w: int = 20) -> str:
     n = int(round(score * w))
     return f"[{'█' * n}{'░' * (w - n)}] {score * 100:5.1f}%"
 
+def _suspect(score: float) -> str:
+    """점수(AI 확률 0~1)를 '몇 %로 분석되어 **verdict**으로 의심됩니다.' 문장으로 변환."""
+    if score >= 0.55:
+        return f"{score * 100:.1f}%로 분석되어 **AI 생성**으로 의심됩니다."
+    elif score <= 0.45:
+        return f"{(1 - score) * 100:.1f}%로 분석되어 **실제 이미지**로 의심됩니다."
+    else:
+        return f"AI 생성 확률 {score * 100:.1f}% — 판별이 어렵습니다. (추가 분석 권장)"
+
 def fmt_stage1(r: dict) -> str:
-    out = ["━━━  Stage 1 — 메타데이터 / 비가시성 워터마크  ━━━", ""]
-    out.append(f"  종합 점수  {_bar(r['score'])}  →  {r['verdict']}")
+    out = ["━━━  Stage 1 — 메타데이터 / 포렌식 분석  ━━━", ""]
+    out.append("  [추론 근거]")
+    out.append("")
+
+    for key, data in r["checks"].items():
+        num, lbl = _S1_LABELS.get(key, ("•", key))
+        w   = _S1_WEIGHTS.get(key, 0.0)
+        s   = data["score"]
+        con = s * w
+        out.append(f"  {num} {lbl}  {s*100:5.1f}%  × {w:.2f}  →  기여 {con*100:5.2f}%")
+        for ind in data["indicators"]:
+            out.append(f"      └ {ind}")
+        out.append("")
+
+    sep = "  " + "─" * 52
+    out.append(sep)
+    out.append(f"  AI 생성 확률  {_bar(r['score'])}")
     out.append(f"  소요 시간  {r['elapsed']}s  |  비용  $0.0000  (로컬 처리)")
     out.append("")
-    label = {
-        "exif":      "EXIF 분석     ", 
-        "c2pa":      "C2PA 출처     ", 
-        "watermark": "SynthID 역공학",
-        "videofact": "VideoFact(WACV)"
-    }
-    for key, data in r["checks"].items():
-        out.append(f"  {label.get(key, key):<14} {_bar(data['score'], 14)}")
-        for ind in data["indicators"]:
-            out.append(f"    • {ind}")
-    out.append("")
-    if r["pass_to_next"]:
-        out.append(f"  → 점수 {r['score']*100:.1f}% < {STAGE1_THRESHOLD*100:.0f}%  :  Stage 2 로 진행")
-    else:
-        out.append(f"  → 점수 {r['score']*100:.1f}% ≥ {STAGE1_THRESHOLD*100:.0f}%  :  AI 생성 확인")
-    return "\n".join(out)
 
-def fmt_stage2(r: dict) -> str:
-    out = ["━━━  Stage 2 — Vertex AI SynthID Detector  ━━━", ""]
-    if not r.get("available"):
-        out.append(f"  ⚠️  {r.get('verdict', 'Vertex AI 미연결')}")
-        out.append(f"  {r.get('raw_msg', '')}")
-        out.append("")
-        out.append("  💡 GOOGLE_APPLICATION_CREDENTIALS 를 .env 에 설정하면 활성화됩니다.")
-        return "\n".join(out)
-    out.append(f"  종합 점수  {_bar(r['score'])}  →  {r['verdict']}")
-    out.append(f"  신뢰 등급  {r['confidence_level']}")
-    out.append(f"  소요 시간  {r['elapsed']}s  |  예상 비용  ${r['cost_usd']:.4f}")
-    out.append("")
-    for line in r.get("raw_msg", "").splitlines():
-        out.append(f"  {line}")
+    # 미로드·오류 키워드로 신뢰 가능한 컴포넌트 수 계산
+    _skip_kw = ("미로드", "미설치", "오류", "실패")
+    n_skipped = sum(
+        1 for data in r["checks"].values()
+        if any(kw in " ".join(data["indicators"]) for kw in _skip_kw)
+    )
+    n_total = len(r["checks"])
+
+    if n_skipped >= n_total - 1:            # 분석 가능 컴포넌트가 1개 이하
+        out.append("  → 주요 분석 모델 미로드로 1단계 스크리닝 불가합니다.")
+        out.append("     2단계 결과만으로 판단하세요.")
+    elif r["score"] > 0.5:
+        out.append(f"  → {r['score']*100:.1f}% — 이상 신호 감지. 2단계 분석을 시행합니다.")
+    else:
+        out.append(f"  → {(1 - r['score'])*100:.1f}% — 이상 신호 없음. 2단계에서 최종 확인합니다.")
     return "\n".join(out)
 
 def fmt_stage3(r: dict) -> str:
@@ -539,80 +648,133 @@ def fmt_stage3(r: dict) -> str:
     if "오류" in r["verdict"]:
         out.append(f"  {r['verdict']}")
         return "\n".join(out)
+
     analysis = r.get("analysis", {})
     if analysis.get("parse_error"):
-        out.append(analysis.get("raw_response", ""))
+        out.append("  [원본 응답]")
+        out.append(f"  {analysis.get('raw_response', '')}")
         return "\n".join(out)
 
-    out.append(f"  판정       {r['verdict']}  (신뢰도 {analysis.get('confidence_pct', 0)}%)")
-    out.append(f"  소요 시간  {r['elapsed']}s  |  예상 비용  ${r['cost_usd']:.4f}")
+    out.append("  [추론 근거]")
     out.append("")
 
+    # ① 직접 관찰 증거
     evidence = analysis.get("evidence", [])
     if evidence:
-        out.append("  ┌ 증거 (직접 관찰) ─────────────────────────")
+        weight_label = {"high": "강", "medium": "중", "low": "약"}
+        weight_icon  = {"high": "🔴", "medium": "🟡", "low": "🟢"}
+        out.append("  ① 직접 관찰 (증거)")
         for e in evidence:
-            icon = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(
-                e.get("weight", "") if isinstance(e, dict) else "", "•")
-            text = e.get("item", str(e)) if isinstance(e, dict) else str(e)
-            out.append(f"  │  {icon} {text}")
-        out.append("  └────────────────────────────────────────────")
+            if isinstance(e, dict):
+                w    = e.get("weight", "")
+                icon = weight_icon.get(w, "•")
+                wlbl = weight_label.get(w, w)
+                text = e.get("item", "")
+            else:
+                icon, wlbl, text = "•", "", str(e)
+            out.append(f"      {icon} [{wlbl}]  {text}")
         out.append("")
 
+    # ② 증거 기반 추론
     inference = analysis.get("inference", [])
     if inference:
-        out.append("  ┌ 추론 (증거 기반 해석) ─────────────────────")
+        out.append("  ② 증거 기반 추론")
         for i in inference:
             if isinstance(i, dict):
-                out.append(f"  │  → {i.get('item', '')}")
+                out.append(f"      → {i.get('item', '')}")
                 if i.get("basis"):
-                    out.append(f"  │      근거: {i['basis']}")
+                    out.append(f"          근거: {i['basis']}")
             else:
-                out.append(f"  │  → {i}")
-        out.append("  └────────────────────────────────────────────")
+                out.append(f"      → {i}")
         out.append("")
 
+    # ③ 세부 분석
     detail = analysis.get("detail", {})
-    if detail:
-        out.append("  ┌ 세부 분석 ─────────────────────────────────")
-        for key, lbl in [("texture","텍스처/피부"), ("lighting","조명/그림자"),
-                         ("anatomy","해부학적  "), ("background","배경      "),
-                         ("artifacts","AI 아티팩트")]:
-            val = detail.get(key, "")
-            if val:
-                out.append(f"  │  {lbl}  {val}")
-        out.append("  └────────────────────────────────────────────")
+    detail_rows = [(k, v) for k, v in [
+        ("texture",    "텍스처/피부"),
+        ("lighting",   "조명/그림자"),
+        ("anatomy",    "해부학적  "),
+        ("background", "배경      "),
+        ("artifacts",  "AI 아티팩트"),
+    ] if detail.get(k)]
+    if detail_rows:
+        out.append("  ③ 세부 분석")
+        for k, lbl in detail_rows:
+            out.append(f"      {lbl}  {detail[k]}")
+        out.append("")
 
+    # ③ Gemma 시각 근거 분석 (앙상블 + 설명 모드)
+    gemma_exp = analysis.get("gemma_explain")
+    if gemma_exp and not gemma_exp.get("error") and not gemma_exp.get("parse_error"):
+        ge_elapsed = gemma_exp.get("_elapsed", 0)
+        out.append(f"  ③ Gemma 시각 근거 분석  ({ge_elapsed:.1f}s)")
+        weight_label = {"high": "강", "medium": "중", "low": "약"}
+        weight_icon  = {"high": "🔴", "medium": "🟡", "low": "🟢"}
+        for e in gemma_exp.get("evidence", []):
+            if isinstance(e, dict):
+                w    = e.get("weight", "")
+                icon = weight_icon.get(w, "•")
+                wlbl = weight_label.get(w, w)
+                text = e.get("item", "")
+            else:
+                icon, wlbl, text = "•", "", str(e)
+            out.append(f"      {icon} [{wlbl}]  {text}")
+        gd = gemma_exp.get("detail", {})
+        gd_rows = [(k, v) for k, v in [
+            ("texture",    "텍스처/피부  "),
+            ("lighting",   "조명/그림자  "),
+            ("anatomy",    "해부학적     "),
+            ("background", "배경         "),
+            ("artifacts",  "AI 아티팩트  "),
+        ] if gd.get(k)]
+        if gd_rows:
+            out.append("")
+            for k, lbl in gd_rows:
+                out.append(f"      {lbl}  {gd[k]}")
+        out.append("")
+    elif gemma_exp and (gemma_exp.get("error") or gemma_exp.get("parse_error")):
+        err_msg = gemma_exp.get("error") or "응답 파싱 실패"
+        out.append(f"  ③ Gemma 시각 근거 분석  오류: {err_msg}")
+        out.append("")
+
+    sep = "  " + "─" * 52
+    out.append(sep)
+    conf_pct = analysis.get("confidence_pct", round(r["score"] * 100))
+    out.append(f"  AI 생성 확률  {_bar(r['score'])}")
+    out.append(f"  소요 시간  {r['elapsed']}s  |  예상 비용  ${r['cost_usd']:.4f}")
+    out.append("")
+    out.append(f"  → {_suspect(r['score'])}")
     return "\n".join(out)
 
-def fmt_summary(s1, s2, s3) -> str:
+def fmt_summary(s1, s3) -> str:
     out = ["━━━━━━━━━━━━━━━  종합 판정  ━━━━━━━━━━━━━━━", ""]
-    scores: list[float] = []
     total_cost = 0.0
 
+    # 1단계: 이진 분류 결과만 표시
     if s1:
-        scores.append(s1["score"])
-        out.append(f"  Stage 1  {_bar(s1['score'], 14)}  {s1['verdict']}")
-    if s2 and s2.get("available"):
-        scores.append(s2["score"])
-        total_cost += s2.get("cost_usd", 0)
-        out.append(f"  Stage 2  {_bar(s2['score'], 14)}  {s2['verdict']}")
+        s1_flag = "의심됨 →" if s1["score"] > 0.5 else "이상 없음"
+        out.append(f"  1단계  {_bar(s1['score'], 14)}  {s1_flag}")
+
+    # 2단계: 결과 표시
     if s3 and "오류" not in s3["verdict"]:
-        scores.append(s3["score"])
         total_cost += s3.get("cost_usd", 0)
-        out.append(f"  Stage 3  {_bar(s3['score'], 14)}  {s3['verdict']}  [{s3['model']}]")
+        out.append(f"  2단계  {_bar(s3['score'], 14)}  ({s3['model']})")
 
     out.append("")
-    if scores:
-        avg = sum(scores) / len(scores)
-        out.append(f"  평균 점수  {_bar(avg)}")
-        if avg >= 0.75:
-            final = "❌  AI 생성 콘텐츠로 판단됨"
-        elif avg >= 0.45:
-            final = "⚠️   판별 불확실 — 추가 검토 필요"
+    sep = "  " + "─" * 52
+    out.append(sep)
+
+    # 최종 판정 = 2단계 단독 결과 (평균 내지 않음)
+    if s3 and "오류" not in s3["verdict"]:
+        out.append(f"  최종 분석  {_bar(s3['score'])}")
+        out.append("")
+        out.append(f"  → {_suspect(s3['score'])}")
+    elif s1:
+        # 2단계 미실행 시 1단계 이진 결과
+        if s1["score"] > 0.5:
+            out.append(f"  → {s1['score']*100:.1f}% — AI 생성으로 의심됩니다.")
         else:
-            final = "✅  실제 콘텐츠로 판단됨"
-        out.append(f"  최종 판정  {final}")
+            out.append(f"  → {(1 - s1['score'])*100:.1f}% — 실제 이미지로 의심됩니다.")
     else:
         out.append("  실행된 단계 없음")
 
@@ -625,11 +787,11 @@ def fmt_summary(s1, s2, s3) -> str:
 # 메인 처리
 # ═══════════════════════════════════════════════════════════
 
-def process(url, uploaded_file, api_key, active_model, use_s1, use_s2, use_s3):
+def process(url, uploaded_file, api_key, active_model, use_s1, use_s3, gemma_explain=False):
     image      = None
     image_path = None
     tmp_path   = None
-    s1 = s2 = s3 = None
+    s1 = s3 = None
 
     try:
         if uploaded_file:
@@ -639,9 +801,9 @@ def process(url, uploaded_file, api_key, active_model, use_s1, use_s2, use_s3):
             image, image_path, _ = download_media(url.strip())
             tmp_path = image_path
         else:
-            return "URL 또는 파일을 입력하세요.", "", "", "", "", None
+            return "URL 또는 파일을 입력하세요.", "", "", "", None
 
-        s1_text = s2_text = s3_text = ""
+        s1_text = s3_text = ""
 
         if use_s1:
             s1      = run_stage1(image, image_path)
@@ -649,24 +811,18 @@ def process(url, uploaded_file, api_key, active_model, use_s1, use_s2, use_s3):
         else:
             s1_text = "(Stage 1 비활성화)"
 
-        if use_s2:
-            s2      = run_stage2(image)
-            s2_text = fmt_stage2(s2)
-        else:
-            s2_text = "(Stage 2 비활성화)"
-
         if use_s3:
-            s3      = run_stage3(image, active_model, api_key)
+            s3      = run_stage3(image, image_path, active_model, api_key, gemma_explain)
             s3_text = fmt_stage3(s3)
         else:
             s3_text = "(Stage 3 비활성화)"
 
-        summary = fmt_summary(s1, s2, s3)
-        return summary, s1_text, s2_text, s3_text, summary, image
+        summary = fmt_summary(s1, s3)
+        return summary, s1_text, s3_text, summary, image
 
     except Exception as e:
         err = f"❌ 오류: {e}"
-        return err, err, "", "", err, None
+        return err, err, "", err, None
     finally:
         if tmp_path and os.path.exists(tmp_path):
             try:
@@ -694,15 +850,16 @@ with gr.Blocks(title="InSIGHT", theme=gr.themes.Soft(), css=CSS) as demo:
 
     gr.Markdown(
         "# 🔍 InSIGHT — AI 생성 이미지/영상 탐지기\n"
-        "Instagram · YouTube URL 또는 이미지 파일 → 3단계 분석 → 증거 기반 판정"
+        "Instagram · YouTube URL 또는 이미지 파일 → 2단계 분석 → 증거 기반 판정"
     )
 
     with gr.Group():
         gr.Markdown("#### Stage 3 분석 모델 선택")
         with gr.Row(equal_height=True):
-            btn_gemini = gr.Button("▶ Gemini 2.5 Flash", variant="primary",   min_width=150)
-            btn_gemma  = gr.Button("   Gemma 4",          variant="secondary", min_width=150)
-            btn_vertex = gr.Button("   VertexAI Gemini",  variant="secondary", min_width=150)
+            btn_gemini  = gr.Button("▶ Gemini 2.5 Flash", variant="primary",   min_width=150)
+            btn_gemini3 = gr.Button("   Gemini 3 Flash",  variant="secondary", min_width=150)
+            btn_gemma   = gr.Button("   Gemma 4",         variant="secondary", min_width=150)
+            btn_ensemble = gr.Button("   앙상블 (ViT×2)", variant="secondary", min_width=150)
         model_label = gr.Markdown("*현재 모델: **Gemini 2.5 Flash***")
 
     gr.Markdown("---")
@@ -718,7 +875,7 @@ with gr.Blocks(title="InSIGHT", theme=gr.themes.Soft(), css=CSS) as demo:
                 file_types=["image"],
             )
             api_key_input = gr.Textbox(
-                label="Gemini API Key  (Stage 3 Gemini 모델 사용 시 필요 / .env에 설정하면 자동 입력)",
+                label="Gemini API Key  (Gemini 모델 사용 시 필요 / .env에 설정하면 자동 입력)",
                 type="password",
                 placeholder="AIza...",
                 value=os.getenv("GEMINI_API_KEY", ""),
@@ -726,9 +883,12 @@ with gr.Blocks(title="InSIGHT", theme=gr.themes.Soft(), css=CSS) as demo:
 
             gr.Markdown("#### 분석 단계 선택")
             with gr.Row():
-                chk1 = gr.Checkbox(value=True,  label="Stage 1  메타데이터 + SynthID 역공학  (무료, 로컬)")
-                chk2 = gr.Checkbox(value=True,  label="Stage 2  Vertex AI SynthID  (GCP 연동)")
-                chk3 = gr.Checkbox(value=True,  label="Stage 3  AI 시각 분석  (Gemini / VertexAI)")
+                chk1 = gr.Checkbox(value=True, label="Stage 1  메타데이터 + 포렌식 분석  (무료, 로컬)")
+                chk3 = gr.Checkbox(value=True, label="Stage 3  AI 시각 분석  (Gemini / Gemma4 / 앙상블)")
+            chk_gemma_explain = gr.Checkbox(
+                value=False,
+                label="앙상블 선택 시 — Gemma 4 시각 근거 설명 추가  (Ollama 필요, 추가 30~60초 소요)",
+            )
 
             analyze_btn = gr.Button("🔍  분석 시작", variant="primary", size="lg")
 
@@ -738,39 +898,52 @@ with gr.Blocks(title="InSIGHT", theme=gr.themes.Soft(), css=CSS) as demo:
     summary_box = gr.Textbox(label="종합 판정", interactive=False, lines=9, elem_classes=["mono"])
 
     with gr.Tabs():
-        with gr.Tab("Stage 1 — 메타데이터/워터마크"):
+        with gr.Tab("Stage 1 — 메타데이터/포렌식"):
             s1_out = gr.Textbox(interactive=False, lines=20, elem_classes=["mono"])
-        with gr.Tab("Stage 2 — SynthID (Vertex AI)"):
-            s2_out = gr.Textbox(interactive=False, lines=20, elem_classes=["mono"])
         with gr.Tab("Stage 3 — AI 시각 분석"):
             s3_out = gr.Textbox(interactive=False, lines=20, elem_classes=["mono"])
         with gr.Tab("종합 (전체)"):
             summary_tab = gr.Textbox(interactive=False, lines=20, elem_classes=["mono"])
 
+    _MODEL_LABELS = {
+        "gemini_flash":  "Gemini 2.5 Flash",
+        "gemini_flash3": "Gemini 3 Flash",
+        "gemma4":        "Gemma 4",
+        "ensemble":      "앙상블 (ViT×2)",
+    }
+
     def _set_model(key: str):
-        labels   = {"gemini_flash": "Gemini 2.5 Flash", "gemma4": "Gemma 4", "vertexai": "VertexAI Gemini"}
-        md_texts = {k: f"*현재 모델: **{v}***" for k, v in labels.items()}
+        lbl = _MODEL_LABELS[key]
+        def _btn(k):
+            return gr.update(
+                value=f"{'▶' if k == key else '  '} {_MODEL_LABELS[k]}",
+                variant="primary" if k == key else "secondary",
+            )
         return (
             key,
-            md_texts[key],
-            gr.update(value=f"{'▶' if key=='gemini_flash' else '  '} {labels['gemini_flash']}",
-                      variant="primary" if key=="gemini_flash" else "secondary"),
-            gr.update(value=f"{'▶' if key=='gemma4'       else '  '} {labels['gemma4']}",
-                      variant="primary" if key=="gemma4"       else "secondary"),
-            gr.update(value=f"{'▶' if key=='vertexai'     else '  '} {labels['vertexai']}",
-                      variant="primary" if key=="vertexai"     else "secondary"),
+            f"*현재 모델: **{lbl}***",
+            _btn("gemini_flash"),
+            _btn("gemini_flash3"),
+            _btn("gemma4"),
+            _btn("ensemble"),
         )
 
-    for btn, key in [(btn_gemini, "gemini_flash"), (btn_gemma, "gemma4"), (btn_vertex, "vertexai")]:
+    for btn, key in [
+        (btn_gemini,   "gemini_flash"),
+        (btn_gemini3,  "gemini_flash3"),
+        (btn_gemma,    "gemma4"),
+        (btn_ensemble, "ensemble"),
+    ]:
         btn.click(
             fn=lambda k=key: _set_model(k),
-            outputs=[active_model_state, model_label, btn_gemini, btn_gemma, btn_vertex],
+            outputs=[active_model_state, model_label,
+                     btn_gemini, btn_gemini3, btn_gemma, btn_ensemble],
         )
 
     analyze_btn.click(
         fn=process,
-        inputs=[url_input, file_input, api_key_input, active_model_state, chk1, chk2, chk3],
-        outputs=[summary_box, s1_out, s2_out, s3_out, summary_tab, image_preview],
+        inputs=[url_input, file_input, api_key_input, active_model_state, chk1, chk3, chk_gemma_explain],
+        outputs=[summary_box, s1_out, s3_out, summary_tab, image_preview],
     )
 
 
