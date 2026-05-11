@@ -55,7 +55,7 @@ cd Last_Project_test
 
 ```bash
 conda env create -f environment_app.yml
-conda activate insight
+conda activate hnf
 ```
 
 > pip만 사용하는 경우: `pip install -r requirements_app.txt`

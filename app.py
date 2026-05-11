@@ -3,7 +3,7 @@ InSIGHT — AI 생성 이미지/영상 판별기 (로컬 데모 버전)
 Instagram / YouTube 링크 또는 이미지 파일 → 2단계 분석 → 증거 기반 판정
 
 실행:
-    conda activate insight
+    conda activate hnf
     python app.py
 
 환경변수: .env 파일에 GEMINI_API_KEY 설정
