@@ -1,0 +1,2 @@
+﻿model,accuracy,precision,recall,f1,fpr,avg_time,tp,fp,fn,tn,n_total,n_valid,n_uncertain,n_failed
+gemma4:e4b,65.33,36.11,25.74,30.06,18.55,24.179,26,46,75,202,350,349,1,1

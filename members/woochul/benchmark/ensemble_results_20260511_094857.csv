@@ -1,0 +1,2 @@
+﻿model,accuracy,precision,recall,f1,fpr,avg_time,tp,fp,fn,tn,n_total,n_failed
+"Ensemble(deploy w=0.6 + sdxl w=0.4, thr=0.5)",89.97,77.97,91.09,84.02,10.48,0.694,92,26,9,222,349,1
