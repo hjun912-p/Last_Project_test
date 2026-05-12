@@ -1,0 +1,16 @@
+{
+  "model_name": "EfficientNetB0",
+  "input_size": [
+    224,
+    224
+  ],
+  "preprocess": "efficientnet",
+  "normalize_size": [
+    512,
+    512
+  ],
+  "trained_on": {
+    "real": 100,
+    "fake": 100
+  }
+}
