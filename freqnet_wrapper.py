@@ -53,30 +53,16 @@ class FreqNetDetector:
 
     @torch.no_grad()
     def detect(self, image: Image.Image) -> float:
-        """
-        이미지 1장에 대해 AI 생성 확률(0~1)을 반환합니다.
-        """
         if self.model is None:
             return 0.0
 
-        # 전처리
-        img = image.convert("RGB")
-        img_np = np.array(img)
-        
-        img_cv = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-        img_res = cv2.resize(img_cv, (256, 256))
-        
-        img_res = img_res.astype(np.float32) / 255.0
+        img_cv = cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2BGR)
+        img_res = cv2.resize(img_cv, (256, 256)).astype(np.float32) / 255.0
         img_res = (img_res - [0.485, 0.456, 0.406]) / [0.229, 0.224, 0.225]
-        
-        # float32 텐서로 명시적 변환 (RuntimeError 방지)
         img_tensor = torch.from_numpy(img_res).permute(2, 0, 1).unsqueeze(0).to(self.device).float()
-        
-        # 추론
+
         try:
-            output = self.model(img_tensor)
-            fake_prob = torch.sigmoid(output).item()
-            return float(fake_prob)
+            return float(torch.sigmoid(self.model(img_tensor)).item())
         except Exception as e:
             print(f"FreqNet 추론 오류: {e}")
             return 0.0

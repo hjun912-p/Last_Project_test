@@ -1,8 +1,8 @@
-import os
 import sys
 import torch
 import yaml
 import numpy as np
+import torchvision.transforms.functional as TF
 from PIL import Image
 from pathlib import Path
 
@@ -53,35 +53,18 @@ class VideoFactDetector:
 
     @torch.no_grad()
     def detect(self, image: Image.Image) -> float:
-        """
-        이미지 1장에 대해 AI 생성 확률(0~1)을 반환합니다.
-        """
         if self.model is None:
             return 0.0
 
-        # 전처리: VideoFact는 (B, C, H, W) 형태의 텐서를 기대함
-        # 기본적으로 1080x1920으로 리사이즈하는 경향이 있음 (inference_single.py 참고)
-        img = image.convert("RGB")
-        img_np = np.array(img).astype(np.float32)
-        
-        # 텐서 변환 (C, H, W)
+        img_np = np.array(image.convert("RGB")).astype(np.float32)
         img_tensor = torch.from_numpy(img_np).permute(2, 0, 1)
-        
-        # 리사이즈 (1080, 1920) - 모델이 학습된 해상도에 맞춤
-        import torchvision.transforms.functional as F
-        img_tensor = F.resize(img_tensor, (1080, 1920), antialias=True)
-        
-        # 배치 차원 추가 (1, C, H, W)
+        # inference_single.py 기준 학습 해상도
+        img_tensor = TF.resize(img_tensor, (1080, 1920), antialias=True)
         img_tensor = img_tensor.unsqueeze(0).to(self.device)
-        
-        # 추론
+
         class_out, _ = self.model(img_tensor)
-        
-        # Softmax 적용하여 확률 도출 (0: Real, 1: Fake)
         probs = torch.softmax(class_out, dim=1)
-        fake_prob = probs[0, 1].item()
-        
-        return float(fake_prob)
+        return float(probs[0, 1].item())
 
 # 싱글톤 인스턴스 생성 (최초 호출 시 로드)
 _detector = None

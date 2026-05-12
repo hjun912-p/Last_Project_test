@@ -139,7 +139,6 @@ def _extract_instagram_shortcode(url: str) -> str | None:
     return m.group(1) if m else None
 
 def _ydl_extract(url: str, ydl_opts: dict, tmp_dir: str) -> tuple[Image.Image, str] | None:
-    """yt-dlp로 다운로드 후 이미지/썸네일 반환. 실패 시 None."""
     img_exts = {".jpg", ".jpeg", ".png", ".webp"}
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.extract_info(url, download=True)
@@ -148,7 +147,8 @@ def _ydl_extract(url: str, ydl_opts: dict, tmp_dir: str) -> tuple[Image.Image, s
     if thumbs:
         img = Image.open(str(thumbs[0])).convert("RGB")
         t = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-        img.save(t.name, "JPEG"); t.close()
+        img.save(t.name, "JPEG")
+        t.close()
         return img, t.name
 
     if CV2_AVAILABLE:
@@ -156,11 +156,13 @@ def _ydl_extract(url: str, ydl_opts: dict, tmp_dir: str) -> tuple[Image.Image, s
                   if f.suffix.lower() in {".mp4", ".webm", ".mkv"}]
         if videos:
             cap = cv2.VideoCapture(str(videos[0]))
-            ret, frame = cap.read(); cap.release()
+            ret, frame = cap.read()
+            cap.release()
             if ret:
                 img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
                 t = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-                img.save(t.name, "JPEG"); t.close()
+                img.save(t.name, "JPEG")
+                t.close()
                 return img, t.name
     return None
 
