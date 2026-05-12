@@ -90,5 +90,7 @@ external/**/weights/*.ckpt
 external/**/*.pth
 *.ckpt
 *.pth
+!external/freqnet/4-classes-freqnet-v2.pth
+!external/videofact/weights/videofact_df.ckpt
 *.zip
 *.tar.gz
