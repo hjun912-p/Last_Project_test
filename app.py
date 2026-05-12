@@ -138,58 +138,79 @@ def _extract_instagram_shortcode(url: str) -> str | None:
     m = re.search(r'/(?:p|reel|tv)/([A-Za-z0-9_-]+)', url)
     return m.group(1) if m else None
 
+def _ydl_extract(url: str, ydl_opts: dict, tmp_dir: str) -> tuple[Image.Image, str] | None:
+    """yt-dlp로 다운로드 후 이미지/썸네일 반환. 실패 시 None."""
+    img_exts = {".jpg", ".jpeg", ".png", ".webp"}
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.extract_info(url, download=True)
+
+    thumbs = [f for f in Path(tmp_dir).iterdir() if f.suffix.lower() in img_exts]
+    if thumbs:
+        img = Image.open(str(thumbs[0])).convert("RGB")
+        t = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+        img.save(t.name, "JPEG"); t.close()
+        return img, t.name
+
+    if CV2_AVAILABLE:
+        videos = [f for f in Path(tmp_dir).iterdir()
+                  if f.suffix.lower() in {".mp4", ".webm", ".mkv"}]
+        if videos:
+            cap = cv2.VideoCapture(str(videos[0]))
+            ret, frame = cap.read(); cap.release()
+            if ret:
+                img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                t = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+                img.save(t.name, "JPEG"); t.close()
+                return img, t.name
+    return None
+
+
 def _download_instagram(url: str) -> tuple[Image.Image, str]:
     if not YTDLP_AVAILABLE:
         raise RuntimeError("yt-dlp 미설치 — pip install yt-dlp")
 
     tmp_dir = tempfile.mkdtemp(prefix="insight_ig_")
-    img_exts = {".jpg", ".jpeg", ".png", ".webp"}
+    base_opts = {
+        "format":         "best",
+        "outtmpl":        os.path.join(tmp_dir, "%(id)s.%(ext)s"),
+        "writethumbnail": True,
+        "quiet":          True,
+        "no_warnings":    True,
+    }
 
-    last_err = None
-    # 브라우저 쿠키 순서로 시도 (로그인 상태 자동 활용)
-    for browser in ["chrome", "safari", "firefox", "chromium"]:
-        ydl_opts = {
-            "format":           "best",
-            "outtmpl":          os.path.join(tmp_dir, "%(id)s.%(ext)s"),
-            "writethumbnail":   True,
-            "quiet":            True,
-            "no_warnings":      True,
-            "cookiesfrombrowser": (browser,),
-        }
+    errors: dict[str, str] = {}
+
+    # 1순위: 프로젝트 루트의 instagram_cookies.txt
+    cookies_file = ROOT / "instagram_cookies.txt"
+    if cookies_file.exists():
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.extract_info(url, download=True)
-
-            # 썸네일 이미지 우선
-            thumbs = [f for f in Path(tmp_dir).iterdir() if f.suffix.lower() in img_exts]
-            if thumbs:
-                img = Image.open(str(thumbs[0])).convert("RGB")
-                tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-                img.save(tmp.name, "JPEG")
-                tmp.close()
-                return img, tmp.name
-
-            # 동영상에서 첫 프레임 추출
-            if CV2_AVAILABLE:
-                videos = [f for f in Path(tmp_dir).iterdir()
-                          if f.suffix.lower() in {".mp4", ".webm", ".mkv"}]
-                if videos:
-                    cap = cv2.VideoCapture(str(videos[0]))
-                    ret, frame = cap.read()
-                    cap.release()
-                    if ret:
-                        img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                        tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-                        img.save(tmp.name, "JPEG")
-                        tmp.close()
-                        return img, tmp.name
+            result = _ydl_extract(url, {**base_opts, "cookiefile": str(cookies_file)}, tmp_dir)
+            if result:
+                return result
         except Exception as e:
-            last_err = e
-            continue
+            errors["cookies.txt"] = str(e)
 
+    # 2순위: 설치된 브라우저 쿠키 (macOS에서는 Chrome만 현실적)
+    for browser in ["chrome", "safari"]:
+        try:
+            result = _ydl_extract(url, {**base_opts, "cookiesfrombrowser": (browser,)}, tmp_dir)
+            if result:
+                return result
+        except Exception as e:
+            msg = str(e)
+            if "Operation not permitted" in msg:
+                errors[browser] = f"{browser} 쿠키 접근 권한 없음 (macOS 보안 제한)"
+            elif "no key found" in msg or "find-generic-password" in msg:
+                errors[browser] = f"{browser} 쿠키 복호화 실패 (Keychain 접근 오류)"
+            else:
+                errors[browser] = msg[:100]
+
+    detail = " | ".join(f"{k}: {v}" for k, v in errors.items())
     raise RuntimeError(
-        f"Instagram 다운로드 실패 — 브라우저(Chrome/Safari)에서 Instagram에 로그인되어 있는지 확인하세요. "
-        f"오류: {last_err}"
+        "Instagram 다운로드 실패.\n"
+        "해결 방법: 프로젝트 루트에 instagram_cookies.txt 파일을 생성하세요.\n"
+        "Chrome 확장 프로그램 'Get cookies.txt LOCALLY'로 instagram.com 쿠키를 내보낸 후\n"
+        f"instagram_cookies.txt 로 저장하면 됩니다.\n내부 오류: {detail}"
     )
 
 def _download_youtube_frame(url: str) -> tuple[Image.Image, str]:
