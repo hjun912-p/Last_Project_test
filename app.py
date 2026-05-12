@@ -80,7 +80,16 @@ try:
 except ImportError:
     ENSEMBLE_AVAILABLE = False
 
+try:
+    import tensorflow as tf
+    TF_AVAILABLE = True
+except Exception:
+    TF_AVAILABLE = False
+
 _ensemble_instance = None
+_efficientnet_model = None
+_EFFICIENTNET_PATH = ROOT / "test_model" / "efficientnet_ai_detector.keras"
+_EFFICIENTNET_META = ROOT / "test_model" / "efficientnet_ai_detector_meta.json"
 
 # ── 설정 ──────────────────────────────────────────────────
 
@@ -112,6 +121,12 @@ MODEL_CONFIGS: dict[str, dict] = {
         "api":            "ensemble",
         "cost_per_image": 0.0,
     },
+    "efficientnet": {
+        "display":        "EfficientNet (팀 학습)",
+        "model_id":       "efficientnet",
+        "api":            "efficientnet",
+        "cost_per_image": 0.0,
+    },
 }
 
 
@@ -124,26 +139,58 @@ def _extract_instagram_shortcode(url: str) -> str | None:
     return m.group(1) if m else None
 
 def _download_instagram(url: str) -> tuple[Image.Image, str]:
-    if not INSTALOADER_AVAILABLE:
-        raise RuntimeError("instaloader 미설치 — pip install instaloader")
-    shortcode = _extract_instagram_shortcode(url)
-    if not shortcode:
-        raise ValueError("Instagram URL에서 shortcode를 추출하지 못했습니다.")
-    L = instaloader.Instaloader(download_pictures=False, quiet=True)
-    ig_user = os.getenv("INSTAGRAM_USERNAME", "")
-    if ig_user:
+    if not YTDLP_AVAILABLE:
+        raise RuntimeError("yt-dlp 미설치 — pip install yt-dlp")
+
+    tmp_dir = tempfile.mkdtemp(prefix="insight_ig_")
+    img_exts = {".jpg", ".jpeg", ".png", ".webp"}
+
+    last_err = None
+    # 브라우저 쿠키 순서로 시도 (로그인 상태 자동 활용)
+    for browser in ["chrome", "safari", "firefox", "chromium"]:
+        ydl_opts = {
+            "format":           "best",
+            "outtmpl":          os.path.join(tmp_dir, "%(id)s.%(ext)s"),
+            "writethumbnail":   True,
+            "quiet":            True,
+            "no_warnings":      True,
+            "cookiesfrombrowser": (browser,),
+        }
         try:
-            L.load_session_from_file(ig_user)
-        except Exception:
-            pass
-    post = instaloader.Post.from_shortcode(L.context, shortcode)
-    resp = requests.get(post.url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-    resp.raise_for_status()
-    img = Image.open(BytesIO(resp.content)).convert("RGB")
-    tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-    img.save(tmp.name, "JPEG")
-    tmp.close()
-    return img, tmp.name
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.extract_info(url, download=True)
+
+            # 썸네일 이미지 우선
+            thumbs = [f for f in Path(tmp_dir).iterdir() if f.suffix.lower() in img_exts]
+            if thumbs:
+                img = Image.open(str(thumbs[0])).convert("RGB")
+                tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+                img.save(tmp.name, "JPEG")
+                tmp.close()
+                return img, tmp.name
+
+            # 동영상에서 첫 프레임 추출
+            if CV2_AVAILABLE:
+                videos = [f for f in Path(tmp_dir).iterdir()
+                          if f.suffix.lower() in {".mp4", ".webm", ".mkv"}]
+                if videos:
+                    cap = cv2.VideoCapture(str(videos[0]))
+                    ret, frame = cap.read()
+                    cap.release()
+                    if ret:
+                        img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                        tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+                        img.save(tmp.name, "JPEG")
+                        tmp.close()
+                        return img, tmp.name
+        except Exception as e:
+            last_err = e
+            continue
+
+    raise RuntimeError(
+        f"Instagram 다운로드 실패 — 브라우저(Chrome/Safari)에서 Instagram에 로그인되어 있는지 확인하세요. "
+        f"오류: {last_err}"
+    )
 
 def _download_youtube_frame(url: str) -> tuple[Image.Image, str]:
     if not YTDLP_AVAILABLE:
@@ -534,11 +581,86 @@ def run_ensemble(image_path: str, explain: bool = False, image: Image.Image = No
             "model":    "앙상블 (ViT×2)",
         }
 
+def run_efficientnet(image: Image.Image) -> dict:
+    global _efficientnet_model
+    t0 = time.time()
+
+    if not TF_AVAILABLE:
+        return {
+            "score": 0.0, "verdict": "오류: TensorFlow 미설치",
+            "elapsed": 0.0, "cost_usd": 0.0,
+            "analysis": {"error": "TensorFlow 미설치 — pip install tensorflow"},
+            "model": "EfficientNet (팀 학습)",
+        }
+    if not _EFFICIENTNET_PATH.exists():
+        return {
+            "score": 0.0, "verdict": "오류: 모델 파일 없음",
+            "elapsed": 0.0, "cost_usd": 0.0,
+            "analysis": {"error": f"모델 파일을 찾을 수 없습니다: {_EFFICIENTNET_PATH}"},
+            "model": "EfficientNet (팀 학습)",
+        }
+    try:
+        if _efficientnet_model is None:
+            _efficientnet_model = tf.keras.models.load_model(str(_EFFICIENTNET_PATH))
+
+        # 메타 정보 로드
+        with open(_EFFICIENTNET_META, "r") as f:
+            meta = json.load(f)
+        input_size = tuple(meta.get("input_size", [224, 224]))
+
+        # 전처리
+        img_arr = image.resize(input_size)
+        img_arr = tf.keras.applications.efficientnet.preprocess_input(
+            np.array(img_arr, dtype=np.float32)
+        )
+        img_arr = np.expand_dims(img_arr, axis=0)
+
+        # 추론
+        t_inf = time.time()
+        pred = _efficientnet_model.predict(img_arr, verbose=0)
+        elapsed = round(time.time() - t_inf, 3)
+
+        # 출력이 sigmoid 단일값이면 AI 확률, softmax [real, ai]면 인덱스 1
+        raw = float(pred[0]) if pred.shape[-1] == 1 else float(pred[0][1])
+        score = round(min(max(raw, 0.0), 1.0), 4)
+        verdict = "AI 생성" if score >= 0.5 else "실제 이미지"
+
+        return {
+            "score":    score,
+            "verdict":  verdict,
+            "elapsed":  elapsed,
+            "cost_usd": 0.0,
+            "analysis": {
+                "verdict":        "AI_GENERATED" if score >= 0.5 else "REAL",
+                "confidence_pct": round(score * 100),
+                "evidence": [
+                    {"item": f"EfficientNetB0 출력값: {score*100:.1f}%", "weight": "high"},
+                    {"item": f"학습 데이터: Real {meta['trained_on']['real']}장 / Fake {meta['trained_on']['fake']}장", "weight": "low"},
+                ],
+                "inference": [
+                    {"item": f"임계값 0.5 기준 → {verdict}", "basis": f"AI 확률 {score*100:.1f}%"},
+                ],
+                "detail": {},
+            },
+            "model": "EfficientNet (팀 학습)",
+        }
+    except Exception as e:
+        return {
+            "score": 0.0, "verdict": f"오류: {e}",
+            "elapsed": round(time.time() - t0, 3), "cost_usd": 0.0,
+            "analysis": {"error": str(e)},
+            "model": "EfficientNet (팀 학습)",
+        }
+
+
 def run_stage3(image: Image.Image, image_path: str, model_key: str, api_key: str, gemma_explain: bool = False) -> dict:
     cfg = MODEL_CONFIGS[model_key]
 
     if cfg["api"] == "ensemble":
         return run_ensemble(image_path, explain=gemma_explain, image=image)
+
+    if cfg["api"] == "efficientnet":
+        return run_efficientnet(image)
 
     t0 = time.time()
 
@@ -854,10 +976,11 @@ with gr.Blocks(title="InSIGHT", theme=gr.themes.Soft(), css=CSS) as demo:
     with gr.Group():
         gr.Markdown("#### Stage 3 분석 모델 선택")
         with gr.Row(equal_height=True):
-            btn_gemini  = gr.Button("▶ Gemini 2.5 Flash", variant="primary",   min_width=150)
-            btn_gemini3 = gr.Button("   Gemini 3 Flash",  variant="secondary", min_width=150)
-            btn_gemma   = gr.Button("   Gemma 4",         variant="secondary", min_width=150)
-            btn_ensemble = gr.Button("   앙상블 (ViT×2)", variant="secondary", min_width=150)
+            btn_gemini       = gr.Button("▶ Gemini 2.5 Flash",      variant="primary",   min_width=150)
+            btn_gemini3      = gr.Button("   Gemini 3 Flash",        variant="secondary", min_width=150)
+            btn_gemma        = gr.Button("   Gemma 4",               variant="secondary", min_width=150)
+            btn_ensemble     = gr.Button("   앙상블 (ViT×2)",        variant="secondary", min_width=150)
+            btn_efficientnet = gr.Button("   EfficientNet (팀 학습)", variant="secondary", min_width=150)
         model_label = gr.Markdown("*현재 모델: **Gemini 2.5 Flash***")
 
     gr.Markdown("---")
@@ -908,6 +1031,7 @@ with gr.Blocks(title="InSIGHT", theme=gr.themes.Soft(), css=CSS) as demo:
         "gemini_flash3": "Gemini 3 Flash",
         "gemma4":        "Gemma 4",
         "ensemble":      "앙상블 (ViT×2)",
+        "efficientnet":  "EfficientNet (팀 학습)",
     }
 
     def _set_model(key: str):
@@ -924,18 +1048,20 @@ with gr.Blocks(title="InSIGHT", theme=gr.themes.Soft(), css=CSS) as demo:
             _btn("gemini_flash3"),
             _btn("gemma4"),
             _btn("ensemble"),
+            _btn("efficientnet"),
         )
 
     for btn, key in [
-        (btn_gemini,   "gemini_flash"),
-        (btn_gemini3,  "gemini_flash3"),
-        (btn_gemma,    "gemma4"),
-        (btn_ensemble, "ensemble"),
+        (btn_gemini,       "gemini_flash"),
+        (btn_gemini3,      "gemini_flash3"),
+        (btn_gemma,        "gemma4"),
+        (btn_ensemble,     "ensemble"),
+        (btn_efficientnet, "efficientnet"),
     ]:
         btn.click(
             fn=lambda k=key: _set_model(k),
             outputs=[active_model_state, model_label,
-                     btn_gemini, btn_gemini3, btn_gemma, btn_ensemble],
+                     btn_gemini, btn_gemini3, btn_gemma, btn_ensemble, btn_efficientnet],
         )
 
     analyze_btn.click(

@@ -30,5 +30,9 @@ yt-dlp>=2024.1.0
 # 환경변수
 python-dotenv>=1.0.0
 
+# EfficientNet (팀 학습 모델)
+tensorflow>=2.16.0
+tensorflow-metal>=1.2.0
+
 # C2PA 출처 검증 (선택)
 c2pa-python>=0.7.0

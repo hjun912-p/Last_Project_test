@@ -1,5 +1,6 @@
 import os
 import sys
+import shutil
 import subprocess
 import urllib.request
 from pathlib import Path
@@ -22,13 +23,21 @@ def clone_repo(url, dest_path, check_file):
     print(f"   [클론 시작] {url}")
     try:
         if dest.exists():
-            # 빈 폴더만 있는 경우 git clone이 실패하므로 내부에 클론 후 이동
+            # 빈 폴더만 있는 경우 git clone이 실패하므로 임시 경로에 클론 후 병합
             tmp = dest.parent / (dest.name + "_tmp")
+            if tmp.exists():
+                shutil.rmtree(tmp)
             subprocess.run(["git", "clone", "--depth=1", url, str(tmp)], check=True)
-            # tmp 안의 파일들을 dest로 이동
             for item in tmp.iterdir():
-                item.rename(dest / item.name)
-            tmp.rmdir()
+                target = dest / item.name
+                if target.exists():
+                    if target.is_dir():
+                        shutil.copytree(str(item), str(target), dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(str(item), str(target))
+                else:
+                    shutil.move(str(item), str(target))
+            shutil.rmtree(tmp)
         else:
             subprocess.run(["git", "clone", "--depth=1", url, str(dest)], check=True)
         print(f"   [완료] {dest.name} 소스코드")
@@ -60,7 +69,7 @@ if __name__ == "__main__":
     REPOS = [
         {
             "name": "VideoFACT 소스코드",
-            "url": "https://github.com/ductai199x/VideoFACT",
+            "url": "https://github.com/ductai199x/videofact-wacv-2024",
             "dest": "external/videofact",
             "check_file": "model",   # model/ 폴더가 있으면 이미 클론된 것
         },
