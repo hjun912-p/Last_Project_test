@@ -32,6 +32,9 @@ python-dotenv>=1.0.0
 
 # EfficientNet (팀 학습 모델)
 tensorflow>=2.16.0
+
+# VideoFACT 의존성
+lightning>=2.0.0
 # Mac (Apple Silicon) 전용 GPU 가속 — Mac 사용자만 별도 설치:
 #   pip install tensorflow-metal>=1.2.0
 
