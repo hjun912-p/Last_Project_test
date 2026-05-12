@@ -137,8 +137,14 @@ MODEL_CONFIGS: dict[str, dict] = {
 # ═══════════════════════════════════════════════════════════
 
 def _extract_instagram_shortcode(url: str) -> str | None:
-    m = re.search(r'/(?:p|reel|tv)/([A-Za-z0-9_-]+)', url)
-    return m.group(1) if m else None
+    # 다양한 형식의 Instagram URL에서 shortcode 추출
+    # 1. 표준 경로: /p/abc, /reel/abc, /reels/abc, /tv/abc
+    m = re.search(r'/(?:p|reel|reels|tv)/([A-Za-z0-9_-]+)', url)
+    if m: return m.group(1)
+    # 2. 쿼리 파라미터 형태 등 기타 패턴
+    m = re.search(r'[/?]modal=([A-Za-z0-9_-]+)', url)
+    if m: return m.group(1)
+    return None
 
 def _ydl_extract(url: str, ydl_opts: dict, tmp_dir: str) -> tuple[Image.Image, str] | None:
     img_exts = {".jpg", ".jpeg", ".png", ".webp"}
@@ -180,6 +186,13 @@ def _download_instagram(url: str) -> tuple[Image.Image, str]:
         "writethumbnail": True,
         "quiet":          True,
         "no_warnings":    True,
+        "nocheckcertificate": True,  # SSL 인증서 오류 방지
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://www.instagram.com/",
+            "Accept-Language": "en-US,en;q=0.9,ko;q=0.8",
+            "X-IG-App-ID": "936619743392459",
+        }
     }
 
     errors: dict[str, str] = {}
@@ -194,8 +207,45 @@ def _download_instagram(url: str) -> tuple[Image.Image, str]:
         except Exception as e:
             errors["cookies.txt"] = str(e)
 
-    # 2순위: 설치된 브라우저 쿠키 (macOS에서는 Chrome만 현실적)
-    for browser in ["chrome", "safari"]:
+    # 2순위: instaloader (로그인 없이 시도)
+    if INSTALOADER_AVAILABLE:
+        try:
+            shortcode = _extract_instagram_shortcode(url)
+            if shortcode:
+                import instaloader
+                L = instaloader.Instaloader(
+                    dirname_pattern=os.path.join(tmp_dir, "{shortcode}"),
+                    download_pictures=True, download_videos=False,
+                    download_video_thumbnails=False, download_geotags=False,
+                    download_comments=False, save_metadata=False, quiet=True
+                )
+                post = instaloader.Post.from_shortcode(L.context, shortcode)
+                L.download_post(post, target=shortcode)
+                
+                download_path = os.path.join(tmp_dir, shortcode)
+                if os.path.exists(download_path):
+                    img_files = [f for f in Path(download_path).iterdir() 
+                                 if f.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}]
+                    if img_files:
+                        img = Image.open(str(img_files[0])).convert("RGB")
+                        t = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+                        img.save(t.name, "JPEG")
+                        t.close()
+                        return img, t.name
+            else:
+                errors["instaloader"] = "URL에서 shortcode를 추출할 수 없습니다."
+        except Exception as e:
+            errors["instaloader"] = str(e)[:100]
+
+    # 3순위: 설치된 브라우저 쿠키
+    if sys.platform == "win32":
+        browsers = ["edge", "chrome", "firefox", "brave"]
+    elif sys.platform == "darwin":
+        browsers = ["safari", "chrome", "firefox"]
+    else:
+        browsers = ["firefox", "chrome", "chromium"]
+
+    for browser in browsers:
         try:
             result = _ydl_extract(url, {**base_opts, "cookiesfrombrowser": (browser,)}, tmp_dir)
             if result:
@@ -203,18 +253,55 @@ def _download_instagram(url: str) -> tuple[Image.Image, str]:
         except Exception as e:
             msg = str(e)
             if "Operation not permitted" in msg:
-                errors[browser] = f"{browser} 쿠키 접근 권한 없음 (macOS 보안 제한)"
-            elif "no key found" in msg or "find-generic-password" in msg:
-                errors[browser] = f"{browser} 쿠키 복호화 실패 (Keychain 접근 오류)"
+                errors[browser] = f"{browser} 쿠키 접근 권한 없음"
+            elif "Could not copy Chrome cookie database" in msg or "database is locked" in msg.lower():
+                errors[browser] = f"{browser} 브라우저가 실행 중입니다. 브라우저를 완전히 종료해 주세요."
+            elif "Failed to decrypt with DPAPI" in msg:
+                errors[browser] = f"{browser} 쿠키 복호화 실패 (Windows 보안 설정 또는 브라우저 버전 문제)"
             else:
                 errors[browser] = msg[:100]
 
+    # 4순위: 단순 requests 시도 (일부 공개 포스트 대응)
+    try:
+        session = requests.Session()
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Referer": "https://www.google.com/",
+        }
+        resp = session.get(url, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            # meta tag에서 og:image 또는 twitter:image 추출 시도
+            img_url = None
+            m = re.search(r'<meta [^>]*property="og:image" [^>]*content="([^"]+)"', resp.text)
+            if m: img_url = m.group(1).replace("&amp;", "&")
+            else:
+                m = re.search(r'<meta [^>]*name="twitter:image" [^>]*content="([^"]+)"', resp.text)
+                if m: img_url = m.group(1).replace("&amp;", "&")
+            
+            if img_url:
+                img_resp = session.get(img_url, headers=headers, timeout=10)
+                img = Image.open(BytesIO(img_resp.content)).convert("RGB")
+                t = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+                img.save(t.name, "JPEG")
+                t.close()
+                return img, t.name
+    except Exception as e:
+        errors["direct_request"] = str(e)[:100]
+
     detail = " | ".join(f"{k}: {v}" for k, v in errors.items())
     raise RuntimeError(
-        "Instagram 다운로드 실패.\n"
-        "해결 방법: 프로젝트 루트에 instagram_cookies.txt 파일을 생성하세요.\n"
-        "Chrome 확장 프로그램 'Get cookies.txt LOCALLY'로 instagram.com 쿠키를 내보낸 후\n"
-        f"instagram_cookies.txt 로 저장하면 됩니다.\n내부 오류: {detail}"
+        "Instagram 다운로드 실패.\n\n"
+        "윈도우 환경에서는 브라우저 보안 정책(DPAPI)으로 인해 쿠키 접근이 차단될 수 있습니다.\n\n"
+        "💡 가장 확실한 해결 방법:\n"
+        "1. Chrome에서 'Get cookies.txt LOCALLY' 확장 프로그램 설치\n"
+        "2. instagram.com 접속 후 쿠키를 내보내어 프로젝트 루트에 'instagram_cookies.txt'로 저장\n"
+        "3. 다시 분석 실행\n\n"
+        "💡 대안:\n"
+        "- 이미지를 마우스 오른쪽 버튼으로 클릭해 '이미지를 다른 이름으로 저장'한 후, **파일 업로드** 기능을 사용하세요.\n"
+        "- 모든 브라우저(Chrome, Edge 등)를 완전히 종료한 후 다시 시도해 보세요.\n\n"
+        f"- 상세 오류: {detail}"
     )
 
 def _download_youtube_frame(url: str) -> tuple[Image.Image, str]:
@@ -688,7 +775,9 @@ def run_efficientnet(image: Image.Image) -> dict:
         elapsed = round(time.time() - t_inf, 3)
 
         # 출력이 sigmoid 단일값이면 AI 확률, softmax [real, ai]면 인덱스 1
-        raw = float(pred[0]) if pred.shape[-1] == 1 else float(pred[0][1])
+        # 0-d array scalar 오류 방지를 위해 flatten() 사용
+        pred_flat = pred.flatten()
+        raw = float(pred_flat[0]) if len(pred_flat) == 1 else float(pred_flat[1])
         score = round(min(max(raw, 0.0), 1.0), 4)
         verdict = "AI 생성" if score >= 0.5 else "실제 이미지"
 
@@ -1114,6 +1203,14 @@ with gr.Blocks(title="InSIGHT", theme=gr.themes.Soft(), css=CSS) as demo:
                 label="Instagram / YouTube URL 또는 이미지 직접 URL",
                 placeholder="https://www.instagram.com/p/...   |   https://youtu.be/...",
             )
+            with gr.Accordion("💡 Instagram 다운로드 실패 시 해결 방법 (Windows 필수 확인)", open=False):
+                gr.Markdown(
+                    "Windows 보안 정책 및 브라우저 파일 잠금으로 인해 URL 분석이 실패할 수 있습니다.\n\n"
+                    "1. **이미지 직접 업로드 (가장 추천)**: Instagram 게시물에서 이미지를 우클릭하여 '이미지를 다른 이름으로 저장'한 후 아래 **'파일 업로드'** 칸에 넣어주세요.\n"
+                    "2. **브라우저 종료**: Chrome 또는 Edge 브라우저를 **완전히 종료**하고 다시 시도하세요.\n"
+                    "3. **쿠키 파일 사용**: Chrome 확장 프로그램 'Get cookies.txt LOCALLY'를 사용해 쿠키를 `instagram_cookies.txt`로 저장하세요.\n"
+                    "4. **yt-dlp 업데이트**: 터미널에서 `pip install -U yt-dlp`를 실행해 보세요."
+                )
             file_input = gr.File(
                 label="또는 이미지 파일 직접 업로드",
                 file_types=["image"],

@@ -95,6 +95,8 @@ external/**/weights/*.ckpt
 external/**/*.pth
 *.ckpt
 *.pth
+efficientnet_ai_detector.keras
+efficientnet_ai_detector_meta.json
 !external/freqnet/4-classes-freqnet-v2.pth
 !external/videofact/weights/videofact_df.ckpt
 *.zip
