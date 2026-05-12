@@ -32,7 +32,8 @@ python-dotenv>=1.0.0
 
 # EfficientNet (팀 학습 모델)
 tensorflow>=2.16.0
-tensorflow-metal>=1.2.0
+# Mac (Apple Silicon) 전용 GPU 가속 — Mac 사용자만 별도 설치:
+#   pip install tensorflow-metal>=1.2.0
 
 # C2PA 출처 검증 (선택)
 c2pa-python>=0.7.0

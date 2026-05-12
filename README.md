@@ -60,6 +60,18 @@ conda activate hnf
 
 > pip만 사용하는 경우: `pip install -r requirements_app.txt`
 
+#### Mac (Apple Silicon) 추가 설치
+
+TensorFlow GPU 가속을 위해 아래 명령어를 **한 번만** 추가 실행합니다.
+
+```bash
+pip install tensorflow-metal==1.2.0
+```
+
+#### Windows
+
+별도 추가 설치 없이 conda 환경 생성만으로 TensorFlow가 설치됩니다.
+
 ### 3단계 — 환경변수 설정
 
 ```bash
@@ -67,9 +79,9 @@ cp env.example .env
 # .env 파일을 열어 GEMINI_API_KEY 입력
 ```
 
-### 4단계 — 외부 모델 가중치 다운로드
+### 4단계 — 외부 모델 소스코드 및 가중치 다운로드
 
-VideoFact / FreqNet 모델 가중치 자동 설치:
+VideoFact / FreqNet 소스코드 클론 + 가중치 자동 설치:
 
 ```bash
 python setup_models.py
@@ -103,7 +115,7 @@ Last_Project_test/
 ├── freqnet_wrapper.py       # FreqNet 래퍼
 ├── setup_models.py          # 모델 가중치 자동 다운로드
 ├── requirements_app.txt     # pip 패키지 목록
-├── environment_app.yml      # conda 환경 설정 (insight)
+├── environment_app.yml      # conda 환경 설정 (hnf)
 ├── env.example              # 환경변수 예시 → .env로 복사해서 사용
 ├── external/
 │   ├── videofact/           # VideoFact 모델 코드 (setup_models.py로 설치)
@@ -121,6 +133,7 @@ Last_Project_test/
 | Gemini 2.5 Flash | `GEMINI_API_KEY` (.env) | 무료 티어 있음 |
 | Gemma 4 (Ollama) | Ollama 설치 + `gemma4:e4b` 풀 | 무료 (로컬) |
 | 앙상블 (ViT×2) | 없음 (HuggingFace 자동 다운로드) | 무료 (로컬) |
+| EfficientNet (팀 학습) | `python setup_models.py` 실행 | 무료 (로컬) |
 
 > 설정이 없어도 앱은 실행됩니다. 해당 모델만 오류 표시됩니다.
 
