@@ -87,6 +87,9 @@ members/woochul/add_*.py
 # 팀원 AI 링크 수집 파일 (개인 보관용)
 members/**/신우철_AI_링크_20개.txt
 
+# Instagram 쿠키 파일 (개인 인증 정보 — 절대 커밋 금지)
+instagram_cookies.txt
+
 # 대용량 모델 가중치 제외 (setup_models.py로 다운로드 권장)
 external/**/weights/*.ckpt
 external/**/*.pth
