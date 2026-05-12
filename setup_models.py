@@ -1,10 +1,10 @@
 import os
 import sys
+import subprocess
 import urllib.request
 from pathlib import Path
 
 def report_progress(block_num, block_size, total_size):
-    """다운로드 진행률 표시"""
     if total_size > 0:
         percent = min(100, int(block_num * block_size * 100 / total_size))
         downloaded = block_num * block_size / (1024 * 1024)
@@ -12,8 +12,32 @@ def report_progress(block_num, block_size, total_size):
         sys.stdout.write(f"\r   > 다운로드 중... {percent}% ({downloaded:.1f}MB / {total:.1f}MB)")
         sys.stdout.flush()
 
+def clone_repo(url, dest_path, check_file):
+    """소스코드 클론. check_file이 이미 있으면 스킵."""
+    dest = Path(dest_path)
+    if (dest / check_file).exists():
+        print(f"   [이미 존재함] {dest.name} 소스코드")
+        return True
+
+    print(f"   [클론 시작] {url}")
+    try:
+        if dest.exists():
+            # 빈 폴더만 있는 경우 git clone이 실패하므로 내부에 클론 후 이동
+            tmp = dest.parent / (dest.name + "_tmp")
+            subprocess.run(["git", "clone", "--depth=1", url, str(tmp)], check=True)
+            # tmp 안의 파일들을 dest로 이동
+            for item in tmp.iterdir():
+                item.rename(dest / item.name)
+            tmp.rmdir()
+        else:
+            subprocess.run(["git", "clone", "--depth=1", url, str(dest)], check=True)
+        print(f"   [완료] {dest.name} 소스코드")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"   [오류] 클론 실패: {e}")
+        return False
+
 def download_file(url, save_path):
-    """파일 다운로드 실행"""
     save_path = Path(save_path)
     if save_path.exists():
         print(f"   [이미 존재함] {save_path.name}")
@@ -21,9 +45,7 @@ def download_file(url, save_path):
 
     print(f"   [다운로드 시작] {save_path.name}")
     try:
-        # 폴더 생성
         save_path.parent.mkdir(parents=True, exist_ok=True)
-        # 다운로드
         urllib.request.urlretrieve(url, str(save_path), report_progress)
         print(f"\n   [완료] {save_path.name}")
     except Exception as e:
@@ -34,6 +56,28 @@ if __name__ == "__main__":
     print(" InSIGHT AI 모델 자동 설치 스크립트")
     print("="*60)
 
+    # 1단계: 소스코드 클론
+    REPOS = [
+        {
+            "name": "VideoFACT 소스코드",
+            "url": "https://github.com/ductai199x/VideoFACT",
+            "dest": "external/videofact",
+            "check_file": "model",   # model/ 폴더가 있으면 이미 클론된 것
+        },
+        {
+            "name": "FreqNet 소스코드",
+            "url": "https://github.com/chuangchuangtan/FreqNet-DeepfakeDetection",
+            "dest": "external/freqnet",
+            "check_file": "networks",  # networks/ 폴더가 있으면 이미 클론된 것
+        },
+    ]
+
+    print("\n[1단계] 소스코드 설치")
+    for repo in REPOS:
+        print(f"\n[*] {repo['name']} 설치 중...")
+        clone_repo(repo["url"], repo["dest"], repo["check_file"])
+
+    # 2단계: 가중치 파일 다운로드
     MODELS = [
         {
             "name": "VideoFact (Deepfake Detector)",
@@ -47,6 +91,7 @@ if __name__ == "__main__":
         }
     ]
 
+    print("\n[2단계] 모델 가중치 다운로드")
     for model in MODELS:
         print(f"\n[*] {model['name']} 설치 중...")
         download_file(model['url'], model['path'])
