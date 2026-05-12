@@ -69,6 +69,8 @@ Thumbs.db
 
 # 학습 데이터 (용량 큰 이미지/영상 데이터셋 제외)
 data/
+!external/freqnet/data/
+!external/freqnet/data/*.py
 
 # 임시 파일
 temp_*.png
@@ -90,5 +92,7 @@ external/**/weights/*.ckpt
 external/**/*.pth
 *.ckpt
 *.pth
+!external/freqnet/4-classes-freqnet-v2.pth
+!external/videofact/weights/videofact_df.ckpt
 *.zip
 *.tar.gz
