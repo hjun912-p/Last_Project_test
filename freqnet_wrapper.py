@@ -33,17 +33,18 @@ class FreqNetDetector:
             return
 
         try:
-            # FreqNet 소스코드에 .cuda()가 하드코딩되어 있어 CPU 환경에서 오류 발생 가능
-            # 이를 해결하기 위해 torch.nn.Module.cuda를 더미 함수로 교체하거나 
-            # 모델 로드 후 적절히 디바이스 이동
-            
-            self.model = FreqNet(block=Bottleneck, layers=[3, 4], num_classes=1)
-            
-            # 가중치 로드
+            # FreqNet 소스코드 내부에 torch.randn(...).cuda() 가 하드코딩되어 있어
+            # CUDA 없는 환경에서 초기화 자체가 실패함.
+            # 초기화 시점에만 .cuda()를 no-op으로 패치해 CPU/MPS에서도 동작하게 처리.
+            _orig_cuda = torch.Tensor.cuda
+            torch.Tensor.cuda = lambda self, *a, **kw: self
+            try:
+                self.model = FreqNet(block=Bottleneck, layers=[3, 4], num_classes=1)
+            finally:
+                torch.Tensor.cuda = _orig_cuda
+
             state_dict = torch.load(str(self.ckpt_path), map_location=self.device)
             self.model.load_state_dict(state_dict, strict=False)
-            
-            # 모델 전체를 타겟 디바이스로 이동 (하드코딩된 .cuda() 파라미터 덮어쓰기)
             self.model.to(self.device)
             self.model.eval()
         except Exception as e:
