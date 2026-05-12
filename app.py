@@ -1,6 +1,6 @@
 """
 InSIGHT — AI 생성 이미지/영상 판별기 (로컬 데모 버전)
-Instagram / YouTube 링크 또는 이미지 파일 → 2단계 분석 → 증거 기반 판정
+Instagram / YouTube 링크 또는 이미지 파일 → 3단계 분석 → 증거 기반 판정
 
 실행:
     conda activate hnf
@@ -73,6 +73,7 @@ sys.path.insert(0, str(ROOT))
 
 from videofact_wrapper import detect_videofact_score
 from freqnet_wrapper import detect_freqnet_score
+from statistical_detector import StatisticalRealDefender
 
 try:
     from ensemble_detector import EnsembleDetector
@@ -90,6 +91,7 @@ _ensemble_instance = None
 _efficientnet_model = None
 _EFFICIENTNET_PATH = ROOT / "test_model" / "efficientnet_ai_detector.keras"
 _EFFICIENTNET_META = ROOT / "test_model" / "efficientnet_ai_detector_meta.json"
+_stat_defender = StatisticalRealDefender(threshold=0.85)
 
 # ── 설정 ──────────────────────────────────────────────────
 
@@ -220,23 +222,17 @@ def _download_youtube_frame(url: str) -> tuple[Image.Image, str]:
         raise RuntimeError("yt-dlp 미설치 — pip install yt-dlp")
     tmp_dir = tempfile.mkdtemp(prefix="insight_yt_")
     ydl_opts = {
-        "format":         "bestvideo[height<=720]+bestaudio/best[height<=720]",
+        # 프레임 추출에는 오디오가 필요 없으므로 ffmpeg 병합이 필요한
+        # bestvideo+bestaudio 조합을 피하고 단일 영상 스트림만 받는다.
+        "format":         "bestvideo[height<=720][ext=mp4][vcodec^=avc1]/best[height<=720][ext=mp4][vcodec^=avc1]/bestvideo[height<=720][ext=mp4]/best[height<=720][ext=mp4]/bestvideo[height<=720]/best[height<=720]/best",
         "outtmpl":        os.path.join(tmp_dir, "%(id)s.%(ext)s"),
         "writethumbnail": True,
+        "noplaylist":      True,
         "quiet":          True,
         "no_warnings":    True,
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.extract_info(url, download=True)
-
-    thumbs = [f for f in Path(tmp_dir).iterdir()
-              if f.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}]
-    if thumbs:
-        img = Image.open(str(thumbs[0])).convert("RGB")
-        tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
-        img.save(tmp.name, "JPEG")
-        tmp.close()
-        return img, tmp.name
 
     if CV2_AVAILABLE:
         videos = [f for f in Path(tmp_dir).iterdir()
@@ -253,6 +249,15 @@ def _download_youtube_frame(url: str) -> tuple[Image.Image, str]:
                 img.save(tmp.name, "JPEG")
                 tmp.close()
                 return img, tmp.name
+
+    thumbs = [f for f in Path(tmp_dir).iterdir()
+              if f.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}]
+    if thumbs:
+        img = Image.open(str(thumbs[0])).convert("RGB")
+        tmp = tempfile.NamedTemporaryFile(suffix=".jpg", delete=False)
+        img.save(tmp.name, "JPEG")
+        tmp.close()
+        return img, tmp.name
 
     raise RuntimeError("YouTube에서 이미지를 추출하지 못했습니다.")
 
@@ -391,6 +396,45 @@ def run_stage1(image: Image.Image, image_path: str) -> dict:
             "freqnet":   {"score": fn_score,   "indicators": fn_ind},
         },
     }
+
+
+# ═══════════════════════════════════════════════════════════
+# Stage 2: statistical real-image filter
+# ═══════════════════════════════════════════════════════════
+
+def run_stage2(image: Image.Image) -> dict:
+    t0 = time.time()
+    try:
+        score, mode, details = _stat_defender.analyze(image)
+        verified_real = score >= _stat_defender.threshold
+        if verified_real:
+            verdict = "실사 확인"
+        elif score >= 0.50:
+            verdict = "판정 보류"
+        else:
+            verdict = "AI 생성 의심"
+
+        return {
+            "score": round(score, 4),
+            "verdict": verdict,
+            "verified_real": verified_real,
+            "pass_to_next": not verified_real,
+            "elapsed": round(time.time() - t0, 3),
+            "cost_usd": 0.0,
+            "mode": mode,
+            "details": details,
+        }
+    except Exception as e:
+        return {
+            "score": 0.0,
+            "verdict": f"오류: {e}",
+            "verified_real": False,
+            "pass_to_next": True,
+            "elapsed": round(time.time() - t0, 3),
+            "cost_usd": 0.0,
+            "mode": "Error",
+            "details": {},
+        }
 
 
 # ═══════════════════════════════════════════════════════════
@@ -786,6 +830,33 @@ def fmt_stage1(r: dict) -> str:
         out.append(f"  → {(1 - r['score'])*100:.1f}% — 이상 신호 없음. 2단계에서 최종 확인합니다.")
     return "\n".join(out)
 
+
+def fmt_stage2(r: dict) -> str:
+    out = ["━━━  Stage 2 — 통계 기반 실사 필터  ━━━", ""]
+    out.append("  [실사 근거]")
+    out.append("")
+
+    details = r.get("details", {})
+    out.append(f"  ① PRNU 노이즈 패턴  {_bar(details.get('prnu_score', 0.0), 14)}")
+    out.append(f"      └ kurtosis={details.get('kurtosis', 0.0):.4f}")
+    out.append(f"  ② NIS 주파수 통계   {_bar(details.get('nis_score', 0.0), 14)}")
+    out.append(f"      └ hf_energy={details.get('hf_energy', 0.0):.4f}")
+    out.append("")
+    out.append(f"  판정 모드  {r.get('mode', 'N/A')}")
+    out.append(f"  실사 확률  {_bar(r['score'])}")
+    out.append(f"  소요 시간  {r['elapsed']}s  |  비용  $0.0000  (로컬 처리)")
+    out.append("")
+
+    if r.get("verified_real"):
+        out.append(f"  → 실사 확률 {r['score']*100:.1f}% ≥ {_stat_defender.threshold*100:.0f}%")
+        out.append("     실제 카메라 통계와 일치하여 AI 시각 분석 단계에서 제외합니다.")
+    elif r["score"] >= 0.50:
+        out.append(f"  → 실사 확률 {r['score']*100:.1f}% — 기준 미달. Stage 3로 넘깁니다.")
+    else:
+        out.append(f"  → 실사 확률 {r['score']*100:.1f}% — 통계적 비정상성이 있어 Stage 3로 넘깁니다.")
+    return "\n".join(out)
+
+
 def fmt_stage3(r: dict) -> str:
     out = [f"━━━  Stage 3 — {r['model']} 시각 분석  ━━━", ""]
     if "오류" in r["verdict"]:
@@ -889,7 +960,7 @@ def fmt_stage3(r: dict) -> str:
     out.append(f"  → {_suspect(r['score'])}")
     return "\n".join(out)
 
-def fmt_summary(s1, s3) -> str:
+def fmt_summary(s1, s2, s3) -> str:
     out = ["━━━━━━━━━━━━━━━  종합 판정  ━━━━━━━━━━━━━━━", ""]
     total_cost = 0.0
 
@@ -898,22 +969,32 @@ def fmt_summary(s1, s3) -> str:
         s1_flag = "의심됨 →" if s1["score"] > 0.5 else "이상 없음"
         out.append(f"  1단계  {_bar(s1['score'], 14)}  {s1_flag}")
 
-    # 2단계: 결과 표시
+    # 2단계: 실사 필터 결과 표시
+    if s2:
+        out.append(f"  2단계  {_bar(s2['score'], 14)}  {s2['verdict']}  [실사 확률]")
+
+    # 3단계: 결과 표시
     if s3 and "오류" not in s3["verdict"]:
         total_cost += s3.get("cost_usd", 0)
-        out.append(f"  2단계  {_bar(s3['score'], 14)}  ({s3['model']})")
+        out.append(f"  3단계  {_bar(s3['score'], 14)}  ({s3['model']})")
 
     out.append("")
     sep = "  " + "─" * 52
     out.append(sep)
 
-    # 최종 판정 = 2단계 단독 결과 (평균 내지 않음)
-    if s3 and "오류" not in s3["verdict"]:
+    if s2 and s2.get("verified_real"):
+        out.append("  최종 판정  ✅  실제 이미지로 판단됨")
+        out.append(f"  근거       2단계 실사 확률이 {s2['score']*100:.1f}%로 기준을 넘었습니다.")
+    # 최종 판정 = 3단계 단독 결과 (평균 내지 않음)
+    elif s3 and "오류" not in s3["verdict"]:
         out.append(f"  최종 분석  {_bar(s3['score'])}")
         out.append("")
         out.append(f"  → {_suspect(s3['score'])}")
+    elif s2:
+        out.append(f"  → 2단계 실사 확률 {s2['score']*100:.1f}% — 실사 확정 기준 미달입니다.")
+        out.append("     Stage 3 AI 시각 분석으로 최종 확인하는 것을 권장합니다.")
     elif s1:
-        # 2단계 미실행 시 1단계 이진 결과
+        # 3단계 미실행 시 1단계 이진 결과
         if s1["score"] > 0.5:
             out.append(f"  → {s1['score']*100:.1f}% — AI 생성으로 의심됩니다.")
         else:
@@ -930,11 +1011,11 @@ def fmt_summary(s1, s3) -> str:
 # 메인 처리
 # ═══════════════════════════════════════════════════════════
 
-def process(url, uploaded_file, api_key, active_model, use_s1, use_s3, gemma_explain=False):
+def process(url, uploaded_file, api_key, active_model, use_s1, use_s2, use_s3, gemma_explain=False):
     image      = None
     image_path = None
     tmp_path   = None
-    s1 = s3 = None
+    s1 = s2 = s3 = None
 
     try:
         if uploaded_file:
@@ -944,9 +1025,9 @@ def process(url, uploaded_file, api_key, active_model, use_s1, use_s3, gemma_exp
             image, image_path, _ = download_media(url.strip())
             tmp_path = image_path
         else:
-            return "URL 또는 파일을 입력하세요.", "", "", "", None
+            return "URL 또는 파일을 입력하세요.", "", "", "", "", None
 
-        s1_text = s3_text = ""
+        s1_text = s2_text = s3_text = ""
 
         if use_s1:
             s1      = run_stage1(image, image_path)
@@ -954,18 +1035,37 @@ def process(url, uploaded_file, api_key, active_model, use_s1, use_s3, gemma_exp
         else:
             s1_text = "(Stage 1 비활성화)"
 
+        if use_s2:
+            if s1 is None or s1["pass_to_next"]:
+                s2 = run_stage2(image)
+                s2_text = fmt_stage2(s2)
+                if s2.get("verified_real"):
+                    summary = fmt_summary(s1, s2, None)
+                    return (
+                        summary,
+                        s1_text,
+                        s2_text,
+                        "(Stage 2에서 실사로 확인되어 Stage 3 생략)",
+                        summary,
+                        image,
+                    )
+            else:
+                s2_text = "(Stage 1에서 AI 증거가 확인되어 Stage 2 실사 필터 생략)"
+        else:
+            s2_text = "(Stage 2 비활성화)"
+
         if use_s3:
             s3      = run_stage3(image, image_path, active_model, api_key, gemma_explain)
             s3_text = fmt_stage3(s3)
         else:
             s3_text = "(Stage 3 비활성화)"
 
-        summary = fmt_summary(s1, s3)
-        return summary, s1_text, s3_text, summary, image
+        summary = fmt_summary(s1, s2, s3)
+        return summary, s1_text, s2_text, s3_text, summary, image
 
     except Exception as e:
         err = f"❌ 오류: {e}"
-        return err, err, "", err, None
+        return err, err, "", "", err, None
     finally:
         if tmp_path and os.path.exists(tmp_path):
             try:
@@ -993,7 +1093,7 @@ with gr.Blocks(title="InSIGHT", theme=gr.themes.Soft(), css=CSS) as demo:
 
     gr.Markdown(
         "# 🔍 InSIGHT — AI 생성 이미지/영상 탐지기\n"
-        "Instagram · YouTube URL 또는 이미지 파일 → 2단계 분석 → 증거 기반 판정"
+        "Instagram · YouTube URL 또는 이미지 파일 → 3단계 분석 → 증거 기반 판정"
     )
 
     with gr.Group():
@@ -1028,6 +1128,7 @@ with gr.Blocks(title="InSIGHT", theme=gr.themes.Soft(), css=CSS) as demo:
             gr.Markdown("#### 분석 단계 선택")
             with gr.Row():
                 chk1 = gr.Checkbox(value=True, label="Stage 1  메타데이터 + 포렌식 분석  (무료, 로컬)")
+                chk2 = gr.Checkbox(value=True, label="Stage 2  통계 기반 실사 필터  (85% 이상 실사 확정)")
                 chk3 = gr.Checkbox(value=True, label="Stage 3  AI 시각 분석  (Gemini / Gemma4 / 앙상블)")
             chk_gemma_explain = gr.Checkbox(
                 value=False,
@@ -1044,6 +1145,8 @@ with gr.Blocks(title="InSIGHT", theme=gr.themes.Soft(), css=CSS) as demo:
     with gr.Tabs():
         with gr.Tab("Stage 1 — 메타데이터/포렌식"):
             s1_out = gr.Textbox(interactive=False, lines=20, elem_classes=["mono"])
+        with gr.Tab("Stage 2 — 통계 기반 실사 필터"):
+            s2_out = gr.Textbox(interactive=False, lines=20, elem_classes=["mono"])
         with gr.Tab("Stage 3 — AI 시각 분석"):
             s3_out = gr.Textbox(interactive=False, lines=20, elem_classes=["mono"])
         with gr.Tab("종합 (전체)"):
@@ -1089,8 +1192,8 @@ with gr.Blocks(title="InSIGHT", theme=gr.themes.Soft(), css=CSS) as demo:
 
     analyze_btn.click(
         fn=process,
-        inputs=[url_input, file_input, api_key_input, active_model_state, chk1, chk3, chk_gemma_explain],
-        outputs=[summary_box, s1_out, s3_out, summary_tab, image_preview],
+        inputs=[url_input, file_input, api_key_input, active_model_state, chk1, chk2, chk3, chk_gemma_explain],
+        outputs=[summary_box, s1_out, s2_out, s3_out, summary_tab, image_preview],
     )
 
 
