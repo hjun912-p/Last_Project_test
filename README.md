@@ -8,6 +8,12 @@
 
 ---
 
+## 데모 영상
+
+[![Demo Video](https://img.youtube.com/vi/4L36k_JjhC8/maxresdefault.jpg)](https://youtu.be/4L36k_JjhC8)
+
+---
+
 ## 팀 구성
 
 | 역할 | 이름 |
