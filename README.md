@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo/404_HumanNotFound.png" alt="InSIGHT Logo" width="200"/>
+  <img src="logo/06 _ Architect_s sketch.png" alt="InSIGHT Logo" width="200"/>
 </p>
 
 # InSIGHT — AI 생성 콘텐츠 탐지기
